@@ -5,10 +5,10 @@
  * spanning the P2_0 to GND30 pads in the perf area.
  *
  * The driver connected to P2_6 in turn drives a relay switching
- * T30 to the Microplex unit. 
+ * T30 to the Microplex unit.
  *
  * Board Note: do not jump RST_E, as this prevents the board from
- *             booting correctly. Upload must be achieved by 
+ *             booting correctly. Upload must be achieved by
  *             manually resetting the board.
  *
  * The MRS programmer is capable of switching both T30 and T15, but
@@ -16,7 +16,7 @@
  * a bricked module, or one with firmware that doesn't support their
  * update protocol, is to catch it in the bootloader immediately
  * after power-on.
- * 
+ *
  */
 
 #include <stdio.h>

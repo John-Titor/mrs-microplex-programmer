@@ -1,7 +1,7 @@
 /*
  * Serial task.
  *
- * Handles received SLCAN commands. 
+ * Handles received SLCAN commands.
  *
  * Note: we only implement the commands necessary to support python-can, as
  * that's what the programmer app uses.
@@ -32,147 +32,168 @@
 
 SerialTask serial_task;
 
-namespace {
-    template<typename T>
-    bool
-    from_hex(const etl::istring &str, unsigned index, unsigned count, T &val)
-    {
-        val = 0;
+namespace
+{
+template<typename T>
+bool
+from_hex(const etl::istring &str, unsigned index, unsigned count, T &val)
+{
+    val = 0;
 
-        while (count--) {
-            auto c = str[index++];
-            val <<= 4;
-            switch (c) {
-            case '0'...'9':
-                val += c - '0';
-                break;
-            case 'a'...'f':
-                val += c - 'a' + 10;
-                break;
-            case 'A'...'F':
-                val += c - 'A' + 10;
-                break;
-            default:
-                return false;
-            }
-        }
-        return true;
-    }
+    while (count--) {
+        auto c = str[index++];
+        val <<= 4;
 
-    bool
-    cmd_version(const etl::istring &str)
-    {
-        UART0.send("0101");
-        return true;
-    }
+        switch (c) {
+        case '0'...'9':
+            val += c - '0';
+            break;
 
-    bool
-    cmd_serial(const etl::istring &str)
-    {
-        UART0.send("mjs0000");
-        return true;
-    }
+        case 'a'...'f':
+            val += c - 'a' + 10;
+            break;
 
-    bool
-    cmd_speed(const etl::istring &str)
-    {
-        switch(str[1]) {
-        case '3':
-            can_task.reinit(CAN_ROM::BR_100000);
+        case 'A'...'F':
+            val += c - 'A' + 10;
             break;
-        case '4':
-            can_task.reinit(CAN_ROM::BR_125000);
-            break;
-        case '5':
-            can_task.reinit(CAN_ROM::BR_250000);
-            break;
-        case '6':
-            can_task.reinit(CAN_ROM::BR_500000);
-            break;
-        case '8':
-            can_task.reinit(CAN_ROM::BR_1000000);
-            break;
+
         default:
             return false;
         }
-        return true;
     }
 
-    bool
-    cmd_open(const etl::istring &str)
-    {
-        can_task.open();
-        return true;
+    return true;
+}
+
+bool
+cmd_version(const etl::istring &str)
+{
+    UART0.send("0101");
+    return true;
+}
+
+bool
+cmd_serial(const etl::istring &str)
+{
+    UART0.send("mjs0000");
+    return true;
+}
+
+bool
+cmd_speed(const etl::istring &str)
+{
+    switch (str[1]) {
+    case '3':
+        can_task.reinit(CAN_ROM::BR_100000);
+        break;
+
+    case '4':
+        can_task.reinit(CAN_ROM::BR_125000);
+        break;
+
+    case '5':
+        can_task.reinit(CAN_ROM::BR_250000);
+        break;
+
+    case '6':
+        can_task.reinit(CAN_ROM::BR_500000);
+        break;
+
+    case '8':
+        can_task.reinit(CAN_ROM::BR_1000000);
+        break;
+
+    default:
+        return false;
     }
 
-    bool
-    cmd_close(const etl::istring &str)
-    {
-        can_task.close();
-        return true;
-    }
+    return true;
+}
 
-    bool
-    cmd_send_regular(const etl::istring &str)
-    {
-        CAN_ROM::Message msg;
-        uint32_t id;
+bool
+cmd_open(const etl::istring &str)
+{
+    can_task.open();
+    return true;
+}
 
-        msg.extended = 0;
-        msg.rtr = 0;
-        if (!from_hex(str, 1, 3, id)
+bool
+cmd_close(const etl::istring &str)
+{
+    can_task.close();
+    return true;
+}
+
+bool
+cmd_send_regular(const etl::istring &str)
+{
+    CAN_ROM::Message msg;
+    uint32_t id;
+
+    msg.extended = 0;
+    msg.rtr = 0;
+
+    if (!from_hex(str, 1, 3, id)
             || !from_hex(str, 4, 1, msg.dlc)) {
-            return false;
-        }
-        msg.id = id;
-        for (auto i = 0; i < msg.dlc; i++) {
-            if (!from_hex(str, 5 + 2 * i, 2, msg.data[i])) {
-                return false;
-            }
-        }
-        CAN_ROM::send(msg);
-        return true;
+        return false;
     }
 
-    bool
-    cmd_send_extended(const etl::istring &str)
-    {
-        CAN_ROM::Message msg;
-        uint32_t id;
+    msg.id = id;
 
-        msg.extended = 1;
-        msg.rtr = 0;
-        if (!from_hex(str, 1, 8, id)
+    for (auto i = 0; i < msg.dlc; i++) {
+        if (!from_hex(str, 5 + 2 * i, 2, msg.data[i])) {
+            return false;
+        }
+    }
+
+    CAN_ROM::send(msg);
+    return true;
+}
+
+bool
+cmd_send_extended(const etl::istring &str)
+{
+    CAN_ROM::Message msg;
+    uint32_t id;
+
+    msg.extended = 1;
+    msg.rtr = 0;
+
+    if (!from_hex(str, 1, 8, id)
             || !from_hex(str, 9, 1, msg.dlc)) {
-            return false;
-        }
-        msg.id = id;
-        for (auto i = 0; i < msg.dlc; i++) {
-            if (!from_hex(str, 10 + 2 * i, 2, msg.data[i])) {
-                return false;
-            }
-        }
-        // handle internal-only commands here
-        if ((msg.id == 0x0fffffff) && (msg.dlc == 1)) {
-            T30_RELAY << ((msg.data[0] & 1) ? RELAY_ON : RELAY_OFF);
-        } else {
-            CAN_ROM::send(msg);
-        }
-        return true;
+        return false;
     }
 
-    struct {
-        char        cmd;
-        bool        (*handler)(const etl::istring &str);
-    } dispatch[] = {
-        {'V',       cmd_version},
-        {'N',       cmd_serial},
-        {'S',       cmd_speed},
-        {'O',       cmd_open},
-        {'C',       cmd_close},
-        {'t',       cmd_send_regular},
-        {'T',       cmd_send_extended},
-    };
+    msg.id = id;
+
+    for (auto i = 0; i < msg.dlc; i++) {
+        if (!from_hex(str, 10 + 2 * i, 2, msg.data[i])) {
+            return false;
+        }
+    }
+
+    // handle internal-only commands here
+    if ((msg.id == 0x0fffffff) && (msg.dlc == 1)) {
+        T30_RELAY << ((msg.data[0] & 1) ? RELAY_ON : RELAY_OFF);
+    } else {
+        CAN_ROM::send(msg);
+    }
+
+    return true;
+}
+
+struct {
+    char        cmd;
+    bool (*handler)(const etl::istring &str);
+} dispatch[] = {
+    {'V',       cmd_version},
+    {'N',       cmd_serial},
+    {'S',       cmd_speed},
+    {'O',       cmd_open},
+    {'C',       cmd_close},
+    {'t',       cmd_send_regular},
+    {'T',       cmd_send_extended},
+};
 }
 
 uint32_t
@@ -182,6 +203,7 @@ SerialTask::task_request_work() const
         LED2 << LED_ON;
         return true;
     }
+
     return false;
 }
 
@@ -192,7 +214,7 @@ SerialTask::task_process_work()
 
     while (UART0.recv(c)) {
         switch (c) {
-            // line terminators - process the command
+        // line terminators - process the command
         case '\r':
         case '\n':
             if (_input_buffer.size() > 0) {
@@ -200,13 +222,16 @@ SerialTask::task_process_work()
                 _input_buffer.clear();
                 LED2 << LED_OFF;
             }
+
             break;
-            // legal command characters
+
+        // legal command characters
         case 'a'...'z':
         case 'A'...'Z':
         case '0'...'9':
             _input_buffer.push_back(c);
             break;
+
         default:
             break;
         }
@@ -226,9 +251,11 @@ SerialTask::_process_command()
             } else {
                 UART0.send('\a');
             }
+
             return;
         }
     }
+
     UART0.send('\a');
 }
 
