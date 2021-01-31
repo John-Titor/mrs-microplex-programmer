@@ -41,7 +41,11 @@ uint32_t
 CANTask::task_request_work() const
 {
     // need to have space to report the message & a message to report
-    return ((UART0.send_space() >= 30) && CAN_ROM::available()) ? 1 : 0;
+    if (CAN_ROM::recv_available()) {
+        LED1 << LED_ON;
+        return true;
+    }
+    return true;
 }
 
 void
@@ -49,9 +53,11 @@ CANTask::task_process_work()
 {
     CAN_ROM::Message msg;
 
-    LED1 << LED_ON;
-    if (CAN_ROM::recv(msg) && _open) {
-        report_message(msg);
+    if (CAN_ROM::recv(msg)) {
+        if (_open) {
+            report_message(msg);
+        }
+        LED1 << LED_OFF;
     }
 }
 

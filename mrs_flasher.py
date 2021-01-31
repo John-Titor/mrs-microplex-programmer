@@ -1,6 +1,14 @@
 #!python3
 #
-# Flash an MRS Microplex 7* device over CAN.
+# Flash an MRS Microplex 7* device.
+#
+# Should work with any CAN adapter supported by python-can, but
+# optimised for use with a homebrew adapter that supports power
+# control.
+#
+# (The MRS adapter has the ability to switch T30 and T15, but
+#  their software doesn't appear to actually exploit it as a way
+#  of recovering bricked units...)
 #
 
 import argparse
@@ -14,6 +22,8 @@ CMD_ID = 0x1ffffff1
 RSP_ID = 0x1ffffff2
 SREC_ID = 0x1ffffff3
 DATA_ID = 0x1ffffff4
+MJS_POWER_ID = 0x0fffffff
+
 
 EEPROM_STARTKENNER = 1331
 EEPROM_MAP = [
@@ -75,6 +85,14 @@ class TXMessage(can.Message):
                          is_extended_id=True,
                          dlc=struct.calcsize(self._format),
                          data=struct.pack(self._format, *args))
+
+
+class MSG_mjs_power(TXMessage):
+    """mjs adapter power control message"""
+    _format = 'B'
+
+    def __init__(self, power_state):
+        super().__init__(MJS_POWER_ID, 1 if power_state else 0)
 
 
 class MSG_ping(TXMessage):
@@ -371,6 +389,37 @@ class CANInterface(object):
             return None
         return msg
 
+    def set_power(self, power_on):
+        self.send(MSG_mjs_power(power_on))
+        time.sleep(0.05 if power_on else 0.5)
+
+    def detect(self):
+        """
+        Power on the module and listen for it to sign on.
+        Send it a ping to keep it in the bootloader for a while.
+        Returns the ID of the detected module.
+        """
+        self.set_power(False)
+        self.set_power(True)
+        rsp = self.recv(0.5)
+        if rsp is None:
+            raise ModuleError('module did not respond to power-on')
+        try:
+            signon = MSG_ack(rsp)
+        except MessageError as e:
+            raise ModuleError('unexpected message from module '
+                              'at power-on.')
+        self.send(MSG_ping())
+        rsp = self.recv()
+        if rsp is None:
+            raise ModuleError('module bootloader did not respond to ping')
+        try:
+            signon = MSG_ack(rsp)
+        except MessageError as e:
+            raise ModuleError('unexpected message from module '
+                              'at power-on.')
+        return signon.module_id
+
     def scan(self):
         """
         Send the all-call message and collect replies.
@@ -617,101 +666,24 @@ class Module(object):
             rsp = self._interface.recv(0.02)
 
 
-def recover_module(interface, args):
-    if args.module_id is None:
-        print('Waiting for module power-up message...')
-    else:
-        print(f'Waiting for module {args.module_id} power-up message')
-    while True:
-        msg = interface.recv()
-        if msg is not None:
-            try:
-                ack = MSG_ack(msg)
-                if args.module_id is not None:
-                    if args.module_id != ack.module_id:
-                        continue
-                return ack.module_id
-            except MessageError:
-                pass
-
-
-def find_module_id(interface, args):
-    """
-    Decide on a module; either one explicitly identified on the
-    commandline, or if there is only one connected module, that one.
-
-    If recovery mode is enabled, wait for either a specific module,
-    or any module, to sign on.
-    """
-
-    # handle recovery mode request
-    if args.recover:
-        return recover_module(interface, args)
-
-    # not recovering, and specific module ID supplied, use that
-    if args.module_id is not None:
-        return args.module_id
-
-    # no module ID specified, scan the bus and if there's exactly
-    # one connected, use that one
-    modules = interface.scan()
-    if len(modules) == 0:
-        raise RuntimeError('no modules detected, maybe try --recover')
-    elif len(modules) > 1:
-        raise RuntimeError('more than one module detected, '
-                           'must supply --module-id')
-    else:
-        return list(modules.keys())[0]
-
-
-def do_scan(interface, args):
-    """scan for modules and print some basic information"""
-    modules = interface.scan()
-    if len(modules) > 0:
-        print(f'{"ID":<6} '
-              f'{"STATUS":8} '
-              f'{"REASON":8} '
-              f'{"TYPE":20} '
-              f'{"NAME":30} '
-              f'{"VERSION":8}')
-        for module_id, info in modules.items():
-            module = Module(interface, module_id, args)
-            properties = module.get_eeprom_properties()
-
-            print(f'{module_id:<6} '
-                  f'{info["status"]:<8} '
-                  f'{info["reason"]:<8} '
-                  f'{properties["Bezeichnung"]:<20} '
-                  f'{properties["Modulname"]:<30} '
-                  f'{properties["SW_Version"]:<8} '
-                  )
-
-
-def do_monitor(interface, args):
-    while True:
-        try:
-            msg = interface.recv(1)
-            if msg is not None:
-                try:
-                    ack = MSG_ack(msg)
-                    print(f'{ack.module_id}: {ack.reason}')
-                except MessageError:
-                    pass
-        except KeyboardInterrupt:
-            break
-
-
 def do_upload(interface, args):
     """implement the --upload option"""
     srecords = Srecords(args.upload, args)
-    module_id = find_module_id(interface, args)
+    module_id = interface.detect()
     module = Module(interface, module_id, args)
     module.upload(srecords)
 
 
+def do_erase(interface, args):
+    """implement the --erase option"""
+    module_id = interface.detect()
+    module = Module(interface, module_id, args)
+    module.erase()
+
+
 def do_eeprom_dump(interface, args):
     """implement the --dump-eeprom option"""
-    module_id = find_module_id(interface, args)
+    module_id = interface.detect()
     module = Module(interface, module_id, args)
     contents = module.get_eeprom()
     print(contents)
@@ -719,32 +691,19 @@ def do_eeprom_dump(interface, args):
 
 def do_eeprom_decode(interface, args):
     """implement the --decode-eeprom option"""
-    module_id = find_module_id(interface, args)
+    module_id = interface.detect()
     module = Module(interface, module_id, args)
     properties = module.get_eeprom_properties()
     for name, value in properties.items():
         print(f'{name:<30} {value}')
 
 
-def do_erase(interface, args):
-    """implement the --erase option"""
-    module_id = find_module_id(interface, args)
-    module = Module(interface, module_id, args)
-    module.erase()
-
-
 def do_x(interface, args):
-    msg = can.Message(arbitration_id=0x0fffffff,
-                      is_extended_id=True,
-                      dlc=1,
-                      data=struct.pack('B', 1))
-    interface.send(msg)
-    interface.recv(2)
-    msg = can.Message(arbitration_id=0x0fffffff,
-                      is_extended_id=True,
-                      dlc=1,
-                      data=struct.pack('B', 0))
-    interface.send(msg)
+    id = interface.detect()
+    print(f'Found {id}')
+    time.sleep(2)
+    do_scan(interface, args)
+    interface.set_power(False)
 
 
 parser = argparse.ArgumentParser(description='MRS Microplex 7* CAN flasher')
@@ -763,14 +722,6 @@ parser.add_argument('--can-speed',
                     default=125000,
                     metavar='BITRATE',
                     help='CAN bitrate')
-parser.add_argument('--module-id',
-                    type=int,
-                    metavar='MODULE_ID',
-                    help='specific module ID to program')
-parser.add_argument('--recover',
-                    action='store_true',
-                    help='wait for a bricked module to '
-                         'be connected / powered up')
 parser.add_argument('--verbose',
                     action='store_true',
                     help='print verbose progress information')
@@ -780,21 +731,15 @@ actiongroup.add_argument('--upload',
                          type=Path,
                          metavar='SRECORD_FILE',
                          help='S-record file to upload')
-actiongroup.add_argument('--scan',
+actiongroup.add_argument('--erase',
                          action='store_true',
-                         help='scan for connected modules')
-actiongroup.add_argument('--monitor',
-                         action='store_true',
-                         help='watch for module status announcements')
+                         help='erase the program')
 actiongroup.add_argument('--dump-eeprom',
                          action='store_true',
                          help='dump the contents of the module EEPROM')
 actiongroup.add_argument('--decode-eeprom',
                          action='store_true',
                          help='decode the contents of the module EEPROM')
-actiongroup.add_argument('--erase',
-                         action='store_true',
-                         help='erase the program')
 actiongroup.add_argument('--x',
                          action='store_true',
                          help='test function')
@@ -809,17 +754,13 @@ else:
         pass
 
 interface = CANInterface(args)
-if args.x:
-    do_x(interface, args)
-if args.scan:
-    do_scan(interface, args)
-if args.monitor:
-    do_monitor(interface, args)
+if args.upload is not None:
+    do_upload(interface, args)
+elif args.erase:
+    do_erase(interface, args)
 elif args.dump_eeprom:
     do_eeprom_dump(interface, args)
 elif args.decode_eeprom:
     do_eeprom_decode(interface, args)
-elif args.erase:
-    do_erase(interface, args)
-elif args.upload is not None:
-    do_upload(interface, args)
+elif args.x:
+    do_x(interface, args)

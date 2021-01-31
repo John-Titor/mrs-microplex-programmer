@@ -69,7 +69,7 @@ namespace {
     bool
     cmd_serial(const etl::istring &str)
     {
-        UART0.send("N0001");
+        UART0.send("mjs0000");
         return true;
     }
 
@@ -178,7 +178,11 @@ namespace {
 uint32_t
 SerialTask::task_request_work() const
 {
-    return UART0.recv_available() ? 1 : 0;
+    if (UART0.recv_available()) {
+        LED2 << LED_ON;
+        return true;
+    }
+    return false;
 }
 
 void
@@ -188,13 +192,16 @@ SerialTask::task_process_work()
 
     while (UART0.recv(c)) {
         switch (c) {
+            // line terminators - process the command
         case '\r':
         case '\n':
             if (_input_buffer.size() > 0) {
                 _process_command();
                 _input_buffer.clear();
+                LED2 << LED_OFF;
             }
             break;
+            // legal command characters
         case 'a'...'z':
         case 'A'...'Z':
         case '0'...'9':
@@ -216,10 +223,8 @@ SerialTask::_process_command()
             // get a view over the remainder of the command
             if (dent.handler(_input_buffer)) {
                 UART0.send('\r');
-                LED2 << LED_OFF;
             } else {
                 UART0.send('\a');
-                LED2 << LED_ON;
             }
             return;
         }
