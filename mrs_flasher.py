@@ -347,6 +347,23 @@ class MSG_srecords_done(RXMessage):
                          raw=raw)
 
 
+class MSG_no_program(RXMessage):
+    """
+    Sent after MSG_srecords_done if the ROM doesn't like the program,
+    e.g. it doesn't have a reset vector.
+    """
+    _format = '>BBBBB'
+    _filter = [(True, 0),
+               (True, 2),
+               (True, 2),
+               (True, 2),
+               (True, 2)]
+
+    def __init__(self, raw):
+        super().__init__(expected_id=RSP_ID,
+                         raw=raw)
+
+
 class CANInterface(object):
     def __init__(self, args):
         self._bus = can.interface.Bus(bustype=args.interface_type,
@@ -454,7 +471,6 @@ class CANInterface(object):
 
 
 class Srecords(object):
-    """XXX should sort records to put S9 at the end"""
     def __init__(self, path, args):
         try:
             with path.open() as f:
@@ -672,6 +688,17 @@ def do_upload(interface, args):
     module_id = interface.detect()
     module = Module(interface, module_id, args)
     module.upload(srecords)
+
+    # check for the "I don't like this program" message that
+    # may be sent after upload
+    msg = interface.recv(0.2)
+    if msg is not None:
+        try:
+            status = MSG_no_program(msg)
+            raise RuntimeError('bootloader rejected program, '
+                               + 'may be missing reset vector')
+        except MessageError:
+            pass
 
 
 def do_erase(interface, args):
