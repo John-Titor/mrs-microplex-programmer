@@ -22,6 +22,7 @@ CMD_ID = 0x1ffffff1
 RSP_ID = 0x1ffffff2
 SREC_ID = 0x1ffffff3
 DATA_ID = 0x1ffffff4
+CONSOLE_ID = 0x1ffffffe
 MJS_POWER_ID = 0x0fffffff
 
 
@@ -374,9 +375,7 @@ class CANInterface(object):
 
         # filter just the IDs we expect to see coming from the module
         self._bus.set_filters([
-            {"can_id": ACK_ID,  "can_mask": (1 << 29) - 1, "extended": True},
-            {"can_id": RSP_ID,  "can_mask": (1 << 29) - 1, "extended": True},
-            {"can_id": DATA_ID, "can_mask": (1 << 29) - 1, "extended": True},
+            {"can_id": 0x1ffffff0,  "can_mask": 0x1ffffff0, "extended": True}
         ])
 
         # flush any buffered messages we don't want to see
@@ -401,7 +400,8 @@ class CANInterface(object):
         """wait for a message"""
         try:
             msg = self._bus.recv(timeout)
-            log(f'CAN RX: {msg}')
+            if msg is not None:
+                log(f'CAN RX: {msg}')
         except can.CanError as e:
             return None
         return msg
@@ -701,6 +701,21 @@ def do_upload(interface, args):
             pass
 
 
+def do_console(interface, args):
+    """implement the --console option"""
+    line = ''
+    while True:
+        msg = interface.recv(1)
+        if msg is not None:
+            if msg.arbitration_id != CONSOLE_ID:
+                print(msg)
+            else:
+                line += msg.data.decode()
+        if line.endswith('\0'):
+            print(line)
+            line = ''
+
+
 def do_erase(interface, args):
     """implement the --erase option"""
     module_id = interface.detect()
@@ -749,6 +764,9 @@ parser.add_argument('--can-speed',
                     default=125000,
                     metavar='BITRATE',
                     help='CAN bitrate')
+parser.add_argument('--console',
+                    action='store_true',
+                    help='monitor console messages after upload')
 parser.add_argument('--verbose',
                     action='store_true',
                     help='print verbose progress information')
@@ -779,15 +797,19 @@ if args.verbose:
 else:
     def log(msg):
         pass
-
-interface = CANInterface(args)
-if args.upload is not None:
-    do_upload(interface, args)
-elif args.erase:
-    do_erase(interface, args)
-elif args.dump_eeprom:
-    do_eeprom_dump(interface, args)
-elif args.decode_eeprom:
-    do_eeprom_decode(interface, args)
-elif args.x:
-    do_x(interface, args)
+try:
+    interface = CANInterface(args)
+    if args.upload is not None:
+        do_upload(interface, args)
+        if args.console:
+            do_console(interface, args)
+    elif args.erase:
+        do_erase(interface, args)
+    elif args.dump_eeprom:
+        do_eeprom_dump(interface, args)
+    elif args.decode_eeprom:
+        do_eeprom_decode(interface, args)
+    elif args.x:
+        do_x(interface, args)
+except KeyboardInterrupt:
+    pass
