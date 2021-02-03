@@ -60,7 +60,7 @@ EEPROM_MAP = [
     ('30s', 'Modulname'),
     ('B',   'BL_CAN_Bus'),
     ('>H',  'COP_WD_Timeout'),
-    ('7B',  None)  # 'Bootloader_Configdaten_Reserve1'
+    ('7B',  'Bootloader_Configdaten_Reserve1')
 ]
 
 
@@ -163,10 +163,10 @@ class RXMessage(object):
     def __init__(self, expected_id, raw):
         if raw.arbitration_id != expected_id:
             raise MessageError(f'expected reply with ID 0x{expected_id:x} '
-                               f'but got 0x{raw.arbitration_id:x}')
+                               f'but got {raw}')
         if raw.dlc != struct.calcsize(self._format):
             raise MessageError(f'expected reply with length {expected_dlc} '
-                               f'but got {raw.dlc}')
+                               f'but got {raw}')
 
         self._data = raw.data
         self._values = struct.unpack(self._format, self._data)
@@ -192,8 +192,12 @@ class MSG_ack(RXMessage):
                (False, 0)]
     REASON_MAP = {
         0x00: 'power-on',
-        0x41: 'reboot',
-        0x51: 'crashed'
+        0x01: 'reset',
+        0x11: 'low-voltage reset',
+        0x21: 'clock lost',
+        0x31: 'address error',
+        0x41: 'illegal opcode',
+        0x51: 'watchdog timeout'
     }
     STATUS_MAP = {
         0: 'OK',
@@ -386,7 +390,7 @@ class CANInterface(object):
                     break
             except Exception:
                 except_count += 1
-                if except_count > 5:
+                if except_count > 100:
                     raise RuntimeError('too many exceptions trying to '
                                        'drain CAN buffer')
         log(self._bus.state)
@@ -418,14 +422,15 @@ class CANInterface(object):
         """
         self.set_power(False)
         self.set_power(True)
-        rsp = self.recv(0.5)
-        if rsp is None:
-            raise ModuleError('module did not respond to power-on')
-        try:
-            signon = MSG_ack(rsp)
-        except MessageError as e:
-            raise ModuleError('unexpected message from module '
-                              'at power-on.')
+        while True:
+            rsp = self.recv(0.5)
+            if rsp is None:
+                raise ModuleError('module did not respond to power-on')
+            try:
+                signon = MSG_ack(rsp)
+                break
+            except MessageError as e:
+                continue
         self.send(MSG_ping())
         rsp = self.recv()
         if rsp is None:
@@ -665,6 +670,7 @@ class Module(object):
                 value = value[0].decode('ascii')
             elif len(value) == 1:
                 value = value[0]
+            print(f'0x{offset + 0x1400:04x} : {name}')
             offset += field_len
             if name is not None:
                 properties[name] = value
@@ -689,16 +695,17 @@ def do_upload(interface, args):
     module = Module(interface, module_id, args)
     module.upload(srecords)
 
-    # check for the "I don't like this program" message that
-    # may be sent after upload
-    msg = interface.recv(0.2)
-    if msg is not None:
-        try:
-            status = MSG_no_program(msg)
-            raise RuntimeError('bootloader rejected program, '
-                               + 'may be missing reset vector')
-        except MessageError:
-            pass
+    if not args.console:
+        # check for the "I don't like this program" message that
+        # may be sent after upload
+        msg = interface.recv(0.2)
+        if msg is not None:
+            try:
+                status = MSG_no_program(msg)
+                raise RuntimeError('bootloader rejected program, '
+                                   + 'may be missing reset vector')
+            except MessageError:
+                pass
 
 
 def do_console(interface, args):
@@ -707,6 +714,17 @@ def do_console(interface, args):
     while True:
         msg = interface.recv(1)
         if msg is not None:
+            try:
+                status = MSG_no_program(msg)
+                raise RuntimeError('bootloader rejected program, '
+                                   + 'may be missing reset vector')
+            except MessageError:
+                pass
+            try:
+                status = MSG_ack(msg)
+                raise RuntimeError(f'module reset due to {status.reason}')
+            except MessageError:
+                pass
             if msg.arbitration_id != CONSOLE_ID:
                 print(msg)
             else:
