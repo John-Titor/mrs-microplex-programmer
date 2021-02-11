@@ -152,7 +152,7 @@ class MSG_erase(TXMessage):
 class MSG_srecord(can.Message):
     """raw S-record data"""
     def __init__(self, data):
-        super().__init__(arbitration_id=0x1ffffff3,
+        super().__init__(arbitration_id=SREC_ID,
                          is_extended_id=True,
                          dlc=len(data),
                          data=data)
@@ -384,22 +384,9 @@ class CANInterface(object):
         self._verbose = args.verbose
 
         # filter just the IDs we expect to see coming from the module
-        self._bus.set_filters([
-            {"can_id": 0x1ffffff0,  "can_mask": 0x1ffffff0, "extended": True}
-        ])
-
-        # flush any buffered messages we don't want to see
-        except_count = 0
-        while True:
-            try:
-                if self._bus.recv(0) is None:
-                    break
-            except Exception:
-                except_count += 1
-                if except_count > 100:
-                    raise RuntimeError('too many exceptions trying to '
-                                       'drain CAN buffer')
-        log(self._bus.state)
+        #self._bus.set_filters([
+        #    {"can_id": 0x1ffffff0,  "can_mask": 0x1ffffff0, "extended": True}
+        #])
 
     def send(self, message):
         """send the message"""
@@ -407,14 +394,8 @@ class CANInterface(object):
         self._bus.send(message, 1)
 
     def recv(self, timeout=2):
-        """wait for a message"""
-        try:
-            msg = self._bus.recv(timeout)
-            if msg is not None:
-                log(f'CAN RX: {msg}')
-        except can.CanError as e:
-            return None
-        return msg
+        """
+        wait for a message
 
         Note the can module will barf if a bad message is received, so we need
         to catch this and retry
@@ -446,26 +427,30 @@ class CANInterface(object):
         Send it a ping to keep it in the bootloader for a while.
         Returns the ID of the detected module.
         """
-        self.set_power(False)
-        self.set_power(True)
+        self.set_power_off()
+        while self.recv(0.25) is not None:
+            # drain buffered messages
+            pass
+        self.set_power_t30()
         while True:
-            rsp = self.recv(0.5)
+            rsp = self.recv(2)
             if rsp is None:
-                raise ModuleError('module did not respond to power-on')
+                raise ModuleError('no power-on message from module')
             try:
                 signon = MSG_ack(rsp)
                 break
             except MessageError as e:
-                continue
+                raise ModuleError(f'unexpected power-on message '
+                                  'from module: {rsp}')
         self.send(MSG_ping())
         rsp = self.recv()
         if rsp is None:
-            raise ModuleError('module bootloader did not respond to ping')
+            raise ModuleError('no ping response from module')
         try:
             signon = MSG_ack(rsp)
         except MessageError as e:
-            raise ModuleError('unexpected message from module '
-                              'at power-on.')
+            raise ModuleError(f'unexpected ping response from '
+                              'module : {rsp}')
         return signon.module_id
 
     def scan(self):
