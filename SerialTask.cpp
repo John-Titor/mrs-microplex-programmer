@@ -175,6 +175,7 @@ cmd_send_extended(const etl::istring &str)
     // handle internal-only commands here
     if ((msg.id == 0x0fffffff) && (msg.dlc == 1)) {
         T30_RELAY << ((msg.data[0] & 1) ? RELAY_ON : RELAY_OFF);
+        T15_RELAY << ((msg.data[0] & 2) ? RELAY_ON : RELAY_OFF);
     } else {
         CAN_ROM::send(msg);
     }

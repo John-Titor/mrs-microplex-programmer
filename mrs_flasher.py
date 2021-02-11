@@ -92,8 +92,14 @@ class MSG_mjs_power(TXMessage):
     """mjs adapter power control message"""
     _format = 'B'
 
-    def __init__(self, power_state):
-        super().__init__(MJS_POWER_ID, 1 if power_state else 0)
+    def __init__(self, t30_state, t15_state):
+        if not t30_state:
+            arg = 0x00
+        elif not t15_state:
+            arg = 0x01
+        else:
+            arg = 0x03
+        super().__init__(MJS_POWER_ID, arg)
 
 
 class MSG_ping(TXMessage):
@@ -410,9 +416,29 @@ class CANInterface(object):
             return None
         return msg
 
-    def set_power(self, power_on):
-        self.send(MSG_mjs_power(power_on))
-        time.sleep(0.05 if power_on else 0.5)
+        Note the can module will barf if a bad message is received, so we need
+        to catch this and retry
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            wait_time = deadline - time.time()
+            try:
+                msg = self._bus.recv(wait_time)
+                if msg is not None:
+                    log(f'CAN RX: {msg}')
+                return msg
+            except Exception:
+                pass
+        return None
+
+    def set_power_off(self):
+        self.send(MSG_mjs_power(False, False))
+
+    def set_power_t30(self):
+        self.send(MSG_mjs_power(True, False))
+
+    def set_power_t30_t15(self):
+        self.send(MSG_mjs_power(True, True))
 
     def detect(self):
         """
@@ -785,6 +811,9 @@ parser.add_argument('--can-speed',
 parser.add_argument('--console',
                     action='store_true',
                     help='monitor console messages after upload')
+parser.add_argument('--kl15-after-upload',
+                    action='store_true',
+                    help='turn KL15 on after upload')
 parser.add_argument('--verbose',
                     action='store_true',
                     help='print verbose progress information')
@@ -819,6 +848,8 @@ try:
     interface = CANInterface(args)
     if args.upload is not None:
         do_upload(interface, args)
+        if args.kl15_after_upload:
+            interface.set_power_t30_t15()
         if args.console:
             do_console(interface, args)
     elif args.erase:

@@ -50,6 +50,8 @@ board_init(void)
     // Relay control
     T30_RELAY.configure(Gpio::Output, Pin::PushPull);
     T30_RELAY << RELAY_OFF;
+    T15_RELAY.configure(Gpio::Output, Pin::PushPull);
+    T15_RELAY << RELAY_OFF;
 }
 
 class Scheduler : public etl::scheduler<etl::scheduler_policy_sequential_single, 2> {};
