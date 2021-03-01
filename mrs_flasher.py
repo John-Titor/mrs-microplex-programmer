@@ -43,7 +43,7 @@ EEPROM_MAP = [
     ('5B',  'ResetReasonCounter'),
     ('B',   'MCU_Type'),
     ('B',   'HW_CAN_Active'),
-    ('3B',  None),  # 'Bootloader_Werksdaten_Reserve1'
+    ('3B',  'Bootloader_Werksdaten_Reserve1'),
     ('>H',  'Bootloader_Version'),
     ('>H',  'PROG_Status'),
     ('>H',  'Portbyte1'),
@@ -384,9 +384,9 @@ class CANInterface(object):
         self._verbose = args.verbose
 
         # filter just the IDs we expect to see coming from the module
-        #self._bus.set_filters([
-        #    {"can_id": 0x1ffffff0,  "can_mask": 0x1ffffff0, "extended": True}
-        #])
+        # self._bus.set_filters([
+        #     {"can_id": 0x1ffffff0,  "can_mask": 0x1ffffff0, "extended": True}
+        # ])
 
     def send(self, message):
         """send the message"""
@@ -799,6 +799,9 @@ parser.add_argument('--console',
 parser.add_argument('--kl15-after-upload',
                     action='store_true',
                     help='turn KL15 on after upload')
+parser.add_argument('--power-off',
+                    action='store_true',
+                    help='turn power off at exit')
 parser.add_argument('--verbose',
                     action='store_true',
                     help='print verbose progress information')
@@ -823,6 +826,7 @@ actiongroup.add_argument('--x',
 
 
 args = parser.parse_args()
+interface = None
 if args.verbose:
     def log(msg):
         print(msg)
@@ -847,3 +851,5 @@ try:
         do_x(interface, args)
 except KeyboardInterrupt:
     pass
+if interface is not None:
+    interface.set_power_off()
