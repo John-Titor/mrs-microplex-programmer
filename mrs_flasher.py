@@ -112,13 +112,11 @@ class MSG_ping(TXMessage):
 
 class MSG_select(TXMessage):
     """selects a specific module for subsequent non-addressed commands"""
-    _format = '>HBBH'
+    _format = '>HI'
 
     def __init__(self, module_id):
         super().__init__(CMD_ID,
                          0x2010,
-                         0,
-                         0,
                          module_id)
 
 
@@ -189,10 +187,8 @@ class RXMessage(object):
 
 class MSG_ack(RXMessage):
     """broadcast message sent by module on power-up, reboot or crash"""
-    _format = '>BBBHBH'
+    _format = '>BIBH'
     _filter = [(False, 0),
-               (True, 0),
-               (True, 0),
                (False, 0),
                (False, 0),
                (False, 0)]
@@ -213,8 +209,10 @@ class MSG_ack(RXMessage):
     def __init__(self, raw):
         super().__init__(expected_id=ACK_ID,
                          raw=raw)
-        (self.reason_code, _, _,
-         self.module_id, self.status_code, self.sw_version) = self._values
+        (self.reason_code,
+         self.module_id,
+         self.status_code,
+         self.sw_version) = self._values
         try:
             self.reason = self.REASON_MAP[self.reason_code]
         except KeyError:
@@ -232,17 +230,15 @@ class MSG_selected(RXMessage):
     self.sw_version appears to be 0 if the app is running,
     or !0 if in program mode
     """
-    _format = '>HBBHH'
+    _format = '>HIH'
     _filter = [(True, 0x2110),
-               (True, 0),
-               (True, 0),
                (False, 0),
                (False, 0)]
 
     def __init__(self, raw):
         super().__init__(expected_id=RSP_ID,
                          raw=raw)
-        (_, _, _, self.module_id, self.sw_version) = self._values
+        (_, self.module_id, self.sw_version) = self._values
 
 
 class MSG_program_nak(RXMessage):
@@ -251,32 +247,28 @@ class MSG_program_nak(RXMessage):
     Module reboots after sending this message (and sends MSG_ack
     with reason='reboot'), apparently into the bootloader.
     """
-    _format = '>HBBHH'
+    _format = '>HIH'
     _filter = [(True, 0x2fff),
-               (True, 0),
-               (True, 0),
                (False, 0),
                (False, 0)]
 
     def __init__(self, raw):
         super().__init__(expected_id=RSP_ID,
                          raw=raw)
-        (_, _, _, self.module_id, _) = self._values
+        (_, self.module_id, _) = self._values
 
 
 class MSG_program_ack(RXMessage):
     """response sent to MSG_program when running the bootloader"""
-    _format = '>HBBHH'
+    _format = '>HIH'
     _filter = [(True, 0x2100),
-               (True, 0),
-               (True, 0),
                (False, 0),
                (False, 0)]
 
     def __init__(self, raw):
         super().__init__(expected_id=RSP_ID,
                          raw=raw)
-        (_, _, _, self.module_id, _) = self._values
+        (_, self.module_id, _) = self._values
 
 
 class MSG_progress(RXMessage):
@@ -441,7 +433,7 @@ class CANInterface(object):
                 break
             except MessageError as e:
                 raise ModuleError(f'unexpected power-on message '
-                                  'from module: {rsp}')
+                                  f'from module: {rsp}')
         self.send(MSG_ping())
         rsp = self.recv()
         if rsp is None:
