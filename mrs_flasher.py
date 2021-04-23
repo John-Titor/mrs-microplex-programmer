@@ -479,45 +479,115 @@ class CANInterface(object):
 
 
 class Srecords(object):
+
+    @classmethod
+    def sum(cls, srec):
+        count = int(f'0x{srec[2:4]}', 16)
+        sum = 0
+        for ofs in range(2, 2 + (count * 2), 2):
+            sum += int(f'0x{srec[ofs:ofs+2]}', 16)
+        return (~sum) & 0xff
+
     def __init__(self, path, args):
+        self._hexbytes = dict()
+
+        # read the input file
         try:
             with path.open() as f:
                 lines = f.readlines()
         except Exception as e:
             raise RuntimeError(f'could not read S-records from {path}')
-        self.lines = list()
-        seen_s9 = False
-        # preprocess into a form ready for sending
+
+        # populate the bytes array with data from the S1 records
         for line in lines:
             if line[0] != 'S':
                 raise RuntimeError(f'malformed S-record: {line}')
-            if line[1] == '9':
-                # SDCC always generates an all-zeroes entrypoint
-                line = "S9032200DA"
-                seen_s9 = True
             elif line[1] != '1':
-                # ignore anything other than S1 and S9 records
+                # ignore anything that's not an S1 record
                 continue
-            else:
-                if seen_s9:
-                    raise RuntimeError('S9 record must be last in the file')
 
-            # verify that the address range is writable
-            count = int(f'0x{line[2:4]}', 16) - 3
+            # get the starting address of the line
             address = int(f'0x{line[4:8]}', 16)
-            end = address + count
-            if (address >= 0x2200) and (end <= 0xaf7b):
-                pass
-            elif (address >= 0xaf80) and (end <= 0xbdff):
-                pass
-            else:
-                # silently discard this, as SDCC etc. will emit vectors
-                # that can't be programmed
-                continue
 
+            # and paste bytes into memory
+            hexbytes = line[8:-3]
+            # log(f"{address:04x}: {hexbytes}")
+            self._insert_bytes(address, hexbytes)
+
+        # locate the reset vector
+        self._entry = self._vector(0)
+        if self._entry is None:
+            raise RuntimeError("no reset vector")
+
+        # extract vectors and patch them into the thunk space
+        try:
+            default_vector = self._vector(32)
+        except KeyError:
+            default_vector = self._entry
+
+        for number in range(0, 32):
+            self._insert_thunk(number, default_vector)
+
+        # prune values outside the writable ROM space
+        for address in sorted(self._hexbytes):
+            if ((address < 0x2200) or (address > 0xbdff)):
+                # log(f"remove {address:04x}")
+                del self._hexbytes[address]
+
+    def _insert_bytes(self, address, hexbytes):
+        while len(hexbytes) > 0:
+            self._hexbytes[address] = hexbytes[0:2]
+            hexbytes = hexbytes[2:]
+            address += 1
+
+    def _insert_thunk(self, number, default_vector):
+        try:
+            vector = self._vector(number)
+        except KeyError:
+            vector = default_vector
+        self._insert_bytes(0xaffc - (number * 4), "CC" + vector + "9D")
+
+    def _vector(self, number):
+        address = 0xfffe - (number * 2)
+        return self._word(address)
+
+    def _word(self, address):
+        try:
+            hi = self._hexbytes[address]
+            lo = self._hexbytes[address + 1]
+            return hi + lo
+        except KeyError:
+            return None
+
+    @property
+    def text_records(self):
+        """generator yielding text S-records"""
+        addresses = sorted(self._hexbytes)
+
+        while len(addresses):
+
+            # address of next S1 record to emit
+            srec_addr = addresses[0]
+            srec_hexbytes = ""
+            byte_addr = srec_addr
+
+            while (byte_addr in addresses) and len(srec_hexbytes) < 64:
+                srec_hexbytes += self._hexbytes[byte_addr]
+                addresses = addresses[1:]
+                byte_addr += 1
+
+            srec = f"S1{(len(srec_hexbytes) >> 1) + 3:02X}{srec_addr:04X}{srec_hexbytes}"
+            srec += f"{Srecords.sum(srec):02X}"
+            yield srec
+
+        yield "S9030000FC"
+
+    @property
+    def upload_records(self):
+        """generator yielding S-records in ready-to-send format"""
+        for srec in self.text_records:
             # first two bytes to send are ascii, remainder are literals
-            self.lines.append(bytearray(line[0:2], 'ascii')
-                              + bytes.fromhex(line[2:]))
+            yield bytearray(srec[0:2], 'ascii') + bytes.fromhex(srec[2:])
 
 
 class Module(object):
@@ -624,13 +694,14 @@ class Module(object):
     def _program(self, srecords):
         """flash srecords to the currently-selected module"""
         progress = 1
-        for srec in srecords.lines:
+        records = list(srecords.upload_records)
+        for srec in records:
             for index in range(0, len(srec), 8):
                 rsp = self._cmd(MSG_srecord(srec[index:index+8]))
             if rsp is None:
                 raise ModuleError(f'timed out waiting for response')
 
-            self._print_progress("FLASH", len(srecords.lines), progress)
+            self._print_progress("FLASH", len(records), progress)
             progress += 1
 
             if rsp.data[0] != 0:
@@ -761,18 +832,15 @@ def do_eeprom_decode(interface, args):
         print(f'{name:<30} {value}')
 
 
-def do_x(interface, args):
-    id = interface.detect()
-    print(f'Found {id}')
-    time.sleep(2)
-    do_scan(interface, args)
-    interface.set_power(False)
+def do_print_srecords(srec_file, args):
+    srecords = Srecords(srec_file, args)
+    for srec in srecords.text_records:
+        print(srec)
 
 
 parser = argparse.ArgumentParser(description='MRS Microplex 7* CAN flasher')
 parser.add_argument('--interface',
                     type=str,
-                    required=True,
                     metavar='INTERFACE_NAME',
                     help='interface name or path')
 parser.add_argument('--interface-type',
@@ -812,9 +880,10 @@ actiongroup.add_argument('--dump-eeprom',
 actiongroup.add_argument('--decode-eeprom',
                          action='store_true',
                          help='decode the contents of the module EEPROM')
-actiongroup.add_argument('--x',
-                         action='store_true',
-                         help='test function')
+actiongroup.add_argument('--print-fixed-srecords',
+                         type=Path,
+                         metavar='SRECORD_FILE',
+                         help='translate an S-record file as it would be for upload')
 
 
 args = parser.parse_args()
@@ -826,21 +895,24 @@ else:
     def log(msg):
         pass
 try:
-    interface = CANInterface(args)
-    if args.upload is not None:
-        do_upload(interface, args)
-        if args.kl15_after_upload:
-            interface.set_power_t30_t15()
-        if args.console:
-            do_console(interface, args)
-    elif args.erase:
-        do_erase(interface, args)
-    elif args.dump_eeprom:
-        do_eeprom_dump(interface, args)
-    elif args.decode_eeprom:
-        do_eeprom_decode(interface, args)
-    elif args.x:
-        do_x(interface, args)
+    if args.print_fixed_srecords is not None:
+        do_print_srecords(args.print_fixed_srecords, args)
+    else:
+        if args.interface is None:
+            raise RuntimeError("--interface not specified")
+        interface = CANInterface(args)
+        if args.upload is not None:
+            do_upload(interface, args)
+            if args.kl15_after_upload:
+                interface.set_power_t30_t15()
+            if args.console:
+                do_console(interface, args)
+        elif args.erase:
+            do_erase(interface, args)
+        elif args.dump_eeprom:
+            do_eeprom_dump(interface, args)
+        elif args.decode_eeprom:
+            do_eeprom_decode(interface, args)
 except KeyboardInterrupt:
     pass
 if interface is not None:
