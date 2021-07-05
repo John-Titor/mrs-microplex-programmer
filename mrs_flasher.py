@@ -501,61 +501,107 @@ class CANInterface(object):
                 break
         return modules
 
+class Srecord(object):
+    """S-record line parser for 16- and 32-bit address records"""
 
-class S32_Srecords_(object):
-    '''Load and fix up S-records for S32-based targets'''
+    def __init__(self, flavor, address, data):
+        self._flavor = flavor
+        self._address = address
+        self._data = data
 
-    class Srecord(object):
-        def __init__(self, flavor, address, data):
-            self._flavor = flavor
-            self._address = address
-            self._data = data
+    @classmethod
+    def from_line(cls, line):
+        if ((line[0] != 'S') or (line[1] not in '135790')):
+            raise RuntimeError(f'malformed or unsupported S-record header {line}')
+        count = int(f'0x{line[2:4]}', 16)
+        if len(line) != ((count * 2) + 4):
+            raise RuntimeError(f'S-record length {count} not {(len(line) - 4) / 2} as expected: \n {line}')
+        payload = bytes.fromhex(line[4:-2])
 
-        @classmethod
-        def from_line(cls, line):
-            if ((line[0] != 'S') or (line[1] not in '135790')):
-                raise RuntimeError(f'malformed or unsupported S-record header {line}')
-            count = int(f'0x{line[2:4]}', 16)
-            if len(line) != (count + 4):
-                raise RuntimeError(f'malformed S-record length {line}')
-            payload = bytes.fromHex(line[2:-2])
+        flavor = line[1]
+        check = int(f'0x{line[-2:]}', 16)
 
-            flavor = line[1]
-            check = int(f'0x{line[-2:]}', 16)
+        # parse selected S-records
+        if flavor == '0':
+            address = 0
+            data = payload[2:].decode('ascii')
+        elif flavor == '1':
+            address = struct.unpack_from('>H', payload)[0]
+            data = payload[2:]
+        elif flavor == '3':
+            address = struct.unpack_from('>I', payload)[0]
+            data = payload[4:]
+        elif flavor == '5':
+            address = struct.unpack_from('>H', payload)[0]
+            data = None
+        elif flavor == '7':
+            address = struct.unpack_from('>I', payload)[0]
+            data = None
+        elif flavor == '9':
+            address = struct.unpack_from('>H', payload)[0]
+            data = None
 
-            # parse selected S-records
-            if flavor == '0':
-                address = None
-                data = payload[2:].decode('ascii')
-            elif flavor == '1':
-                (address) = struct.unpack_from('<H', payload)
-                data = payload[2:]
-            elif flavor == '3':
-                (address) = struct.unpack_from('<I', payload)
-                data = payload[4:]
-            elif flavor == '5':
-                address = struct.unpack_from('<H', payload)
-                data = None
-            elif flavor == '7':
-                (address) = struct.unpack_from('<I', payload)
-                data = None
-            elif flavor == '9':
-                (address) = struct.unpack_from('<H', payload)
-                data = None
+        return cls(flavor, address, data)
 
-            return Srecord(flavor, address, data)
+    @classmethod
+    def from_data(cls, flavor, address, data):
+        return cls(flavor, address, data)
 
-        @property
-        def flavor(self):
-            return self._flavor
+    @property
+    def flavor(self):
+        return self._flavor
 
-        @property
-        def address(self):
-            return self._address
+    @property
+    def address(self):
+        return self._address
 
-        @property
-        def data(self):
-            return self._data
+    @property
+    def data(self):
+        return self._data
+
+    @property
+    def check(self):
+        """compute the checksum byte"""
+        if self._flavor in '0159':
+            adata = self._address.to_bytes(2, byteorder='big')
+        elif self._flavor in '37':
+            adata = self._address.to_bytes(4, byteorder='big')
+        accum = len(adata) + 1
+        for b in adata:
+            accum += b
+        if self._data is not None:
+            accum += len(self._data)
+            for b in self._data:
+                accum += b
+        return ~accum & 0xff
+
+    def __str__(self):
+        if self._flavor == '0':
+            address = '0000'
+            payload = self._data.encode("ascii")
+        if self._flavor == '1':
+            address = f'{self._address:04X}'
+            payload = self._data.hex().upper()
+        if self._flavor == '3':
+            address = f'{self._address:08X}'
+            payload = self._data.hex().upper()
+        if self._flavor == '5':
+            address = f'{self._address:04X}'
+            payload = ''
+        if self._flavor == '7':
+            address = f'{self._address:08X}'
+            payload = ''
+        if self._flavor == '9':
+            address = f'{self._address:04X}'
+            payload = ''
+        length = ((len(address) + len(payload)) >> 1) + 1
+
+        record = f'S{self._flavor}{length:02X}{address}{payload}{self.check:02X}'
+        return record
+
+
+class S32K_Srecords(object):
+    '''Load and fix up S-records for S32K-based targets'''
 
     def __init__(self, path, args, mcu_type):
 
@@ -580,18 +626,18 @@ class S32_Srecords_(object):
         header_base = flash_limit
         image_limit = self._flash_base
         for line in lines:
-            srec = Srecord.from_line(line)
+            srec = Srecord.from_line(line.strip())
 
             # flash data
             if srec.flavor == '3':
                 limit = srec.address + len(srec.data)
                 if (srec.address < self._flash_base) or (limit > flash_limit):
-                    raise RuntimeError(f'data outside flashable area')
+                    raise RuntimeError(f'address {srec.address:#08x} outside flashable area')
                 mem_records[srec.address] = srec.data
                 if limit > image_limit:
                     image_limit = limit
-                if srec.address < app_base:
-                    app_base = srec.address
+                if srec.address < header_base:
+                    header_base = srec.address
 
             # entrypoint
             if srec.flavor == '7':
@@ -600,26 +646,27 @@ class S32_Srecords_(object):
         # sanity-check the entrypoint
         if self._image_entry is None:
             raise RuntimeError(f'missing entrypoint')
-        if (self._image_entry < app_base) or (self._image_entry > image_limit):
+        if (self._image_entry < header_base) or (self._image_entry > image_limit):
             raise RuntimeError(f'entrypoint outside app')
 
         # image must start at base of flash
         if header_base != self._flash_base:
             raise RuntimeError(f'data does not start at base of flash')
 
-        # round the image limit up to a multiple of 256 (only for S32)
+        # round the image limit up to a multiple of 256
+        # XXX is this a hard requirement, or only for signing?
         mod = image_limit % 256
         if mod != 0:
             image_limit += 256 - mod
 
-        # build the memory array, pad with zeros
+        # build the memory array, default locations are all-zero
         self._mem_buf = bytearray(image_limit - self._flash_base)
 
-        # and fill it with srecord data
-        for srec in mem_records:
-            rec_offset = srec.address - self._flash_base
-            rec_limit = rec_offset + len(srec.data)
-            self._mem_buf[rec_offset:rec_limit] = srec.data
+        # and populate it with srecord data
+        for address, payload in mem_records.items():
+            rec_offset = address - self._flash_base
+            rec_limit = rec_offset + len(payload)
+            self._mem_buf[rec_offset:rec_limit] = payload
 
         # do header fixups
         self._fix_flash_header()
@@ -636,6 +683,7 @@ class S32_Srecords_(object):
         #     uint8_t reserve[460];         zeros
         #     uint8_t signature_key[512];   zeros
         # } struct_hal_sys_app_header_t;
+        #
         header_fmt = '<IIIII20s'
 
         # parse the current header state
@@ -644,38 +692,61 @@ class S32_Srecords_(object):
          app_header_version,
          application_crc,
          application_length,
-         sw_version) = struct.unpack_from(header_fmt, mem_buf, 0)
+         sw_version) = struct.unpack_from(header_fmt, self._mem_buf, 0)
 
         if app_header_version != 1:
             raise RuntimeError(f'unsupported flash header version {app_header_version}')
 
-        #  check whether the header has already been populated...
-        if application_crc == 0:
-            # compute the application CRC and length
-            application_crc = crc32(self._mem_buf[0x1000:])
-            application_length = len(self._mem_buf) - 0x1000
+        # compute the application CRC and length
+        new_app_crc = crc32(self._mem_buf[0x1000:])
+        new_app_length = len(self._mem_buf) - 0x1000
 
-            # Fill in the header
+        #  check whether the header has already been populated...
+        if application_crc != 0:
+
+            # verify that the header matches our expectations
+            if application_length != new_app_length:
+                raise RuntimeError(f'app length mismatch {new_app_length} != {application_length}')
+            if application_crc != new_app_crc:
+                raise RuntimeError(f'app crc mismatch {new_app_crc:#08x} != {application_crc:#08x}')
+            new_hdr_crc = crc32(self._mem_buf[0x8:0x1000])
+            if header_crc != new_hdr_crc:
+                raise RuntimeError(f'header crc mismatch {new_hdr_crc:#08x} != {header_crc:#08x}')
+
+        else:
+            # Fill in the header with the computed app CRC and size
             #
             struct.pack_into(self._mem_buf, header_fmt, 0,
-                             0x12345678,            # header_key
-                             0,                     # header_crc
-                             1,                     # app_header_version
-                             application_crc,       # application_crc
-                             application_length,    # application_length
+                             0x12345678,        # header_key
+                             0,                 # header_crc
+                             1,                 # app_header_version
+                             new_app_crc,       # application_crc
+                             new_app_length,    # application_length
                              'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0')
 
             # compute the header CRC
-            header_crc = crc32(self._mem_buf[0x8:0x1000])
+            new_hdr_crc = crc32(self._mem_buf[0x8:0x1000])
 
-            # rewrite the header with corrected CRC
+            # rewrite the header with the computed header CRC
             struct.pack_into(self._mem_buf, header_fmt, 0,
-                             0x12345678,            # header_key
-                             header_crc,            # header_crc
-                             1,                     # app_header_version
-                             application_crc,       # application_crc
-                             application_length,    # application_length
+                             0x12345678,        # header_key
+                             new_hdr_crc,       # header_crc
+                             1,                 # app_header_version
+                             new_app_crc,       # application_crc
+                             new_app_length,    # application_length
                              'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0')
+
+        # Note also FlashConfiguration section just after vectors:
+        #
+        # .section .FlashConfig, "a"
+        # .long 0xFFFFFFFF     /* 8 bytes backdoor comparison key           */
+        # .long 0xFFFFFFFF     /*                                           */
+        # .long 0xFFFFFFFF     /* 4 bytes program flash protection bytes    */
+        # .long 0xFFFF7FFE     /* FDPROT:FEPROT:FOPT:FSEC(0xFE = unsecured) */
+        #
+        # MRS-generated image seems to contain default values, but keep this
+        # in case we want to try patching it later.
+        #
 
     @property
     def text_records(self):
@@ -683,11 +754,10 @@ class S32_Srecords_(object):
 
         for offset in range(0, len(self._mem_buf), 32):
             address = self._flash_base + offset
-            data = self._mem_buf[offset:offset + 32]
-            yield(f'S325{address:08x}{data.hex()}{self.sum(data):02x}')
+            payload = self._mem_buf[offset:offset + 32]
+            yield str(Srecord('3', address, payload))
 
-        data = struct.pack('<I', self._image_entry)
-        yield(f'S705{data.hex()}{self.sum(data):02x}')
+        yield str(Srecord('7', self._image_entry, None))
 
     @property
     def upload_records(self):
@@ -695,13 +765,6 @@ class S32_Srecords_(object):
         for srec in self.text_records:
             # first two bytes to send are ascii, remainder are literals
             yield bytearray(srec[0:2], 'ascii') + bytes.fromhex(srec[2:])
-
-    @staticmethod
-    def sum(data):
-        check = 0
-        for b in data:
-            check += b
-        return check & 0xff
 
 
 class HS08_Srecords(object):
@@ -1053,6 +1116,12 @@ def do_print_parameters(module, args):
 
 def do_print_hcs08_srecords(srec_file, args):
     srecords = HCS08_Srecords(srec_file, args)
+    for srec in srecords.text_records:
+        print(srec)
+
+
+def do_print_s32k_srecords(srec_file, args):
+    srecords = S32K_Srecords(srec_file, args, 6)
     for srec in srecords.text_records:
         print(srec)
 
