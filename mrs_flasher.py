@@ -1,6 +1,6 @@
 #!python3
 #
-# Flash an MRS Microplex 7* device.
+# Flash programmer for various MRS devices.
 #
 # Should work with any CAN adapter supported by python-can, but
 # optimised for use with a homebrew adapter that supports power
@@ -10,18 +10,31 @@
 #  their software doesn't appear to actually exploit it as a way
 #  of recovering bricked units...)
 #
+# Newer S-record input includes S0 records denoting the intended
+# target device part / order numbers and hardware revisions, e.g.:
+#
+# MRS-Check>>>400803,400948,401395,401380,400817,400811,400814,400819,401368<<<B,B1 // V2.6.0.0 Lib-S32K-2.6.0
+# MRS-ProgData>>>125 kBit;V0.0.0;CC16WP Application
+# MRS-ExtraData>>>1.154.300.00,1.154.211.00,1.154.300.0010,1.154.300.0200,1.154.300.10,1.154.302.00,1.154.302.03,1.154.310.00,1.154.320.00,1.154.330.00,1.154.343.03,1.154.;B,B1;
+#
+# An S5 record may also be present.
+#
 
 import argparse
 import struct
 import time
 from pathlib import Path
+from binascii import crc32
 import can
 
+# MRS-used CAN IDs
 ACK_ID = 0x1ffffff0
 CMD_ID = 0x1ffffff1
 RSP_ID = 0x1ffffff2
 SREC_ID = 0x1ffffff3
 DATA_ID = 0x1ffffff4
+
+# Programmer-specific messages
 CONSOLE_ID = 0x1ffffffe
 MJS_POWER_ID = 0x0fffffff
 
@@ -31,33 +44,37 @@ EEPROM_MAP = [
     # (format, name)
     # ('2B' '??'),
     # ('>H' 'Startkenner'),
-    ('>I',  'Seriennummer'),
-    ('12s', 'Teilenummer'),
-    ('12s', 'Zeichnungsnummer'),
-    ('20s', 'Bezeichnung'),
-    ('8s',  'Fertigungsauftrag'),
-    ('8s',  'Pruefdatum'),
+    ('>I',  'Serial_Number'),
+    ('12s', 'Part_Number'),
+    ('12s', 'Drawing_Number'),
+    ('20s', 'Name'),
+    ('8s',  'Order_Number'),
+    ('8s',  'Test_Date'),
     ('>H',  'HW_Version'),
-    ('B',   'ResetCounter'),
+    ('B',   'Reset_Counter'),
     ('>H',  'Library_Version'),
-    ('5B',  'ResetReasonCounter'),
+    ('B',   'ResetReasonCounter_LVD'),
+    ('B',   'ResetReasonCounter_LOC'),
+    ('B',   'ResetReasonCounter_ILAD'),
+    ('B',   'ResetReasonCounter_ILOP'),
+    ('B',   'ResetReasonCounter_COP'),
     ('B',   'MCU_Type'),
     ('B',   'HW_CAN_Active'),
     ('3B',  'Bootloader_Werksdaten_Reserve1'),
     ('>H',  'Bootloader_Version'),
-    ('>H',  'PROG_Status'),
+    ('>H',  'Prog_State'),
     ('>H',  'Portbyte1'),
     ('>H',  'Portbyte2'),
     ('>H',  'Baudrate_Bootloader1'),
     ('>H',  'Baudrate_Bootloader2'),
-    ('B',   'Bootloader_ID_ext'),
-    ('>I',  'Bootloader_ID'),
-    ('B',   'Bootloader_ID_CRC'),
-    ('B',   'Bootloader_ID_Kopie_ext'),
-    ('>I',  'Bootloader_ID_Kopie'),
-    ('B',   'Bootloader_ID_Kopie_CRC'),
-    ('20s', 'SW_Version'),
-    ('30s', 'Modulname'),
+    ('B',   'Bootloader_ID_Ext1'),
+    ('>I',  'Bootloader_ID1'),
+    ('B',   'Bootloader_ID_CRC1'),
+    ('B',   'Bootloader_ID_Ext2'),
+    ('>I',  'Bootloader_ID2'),
+    ('B',   'Bootloader_ID_CRC2'),
+    ('20s', 'Sofware_Version'),
+    ('30s', 'Module_Name'),
     ('B',   'BL_CAN_Bus'),
     ('>H',  'COP_WD_Timeout'),
     ('7B',  'Bootloader_Configdaten_Reserve1')
@@ -293,12 +310,14 @@ class MSG_erase_done(RXMessage):
     _format = '>BBBB'
     _filter = [(True, 0),
                (True, 0),
-               (True, 0),
+               (False, 0),
                (True, 1)]
 
     def __init__(self, raw):
         super().__init__(expected_id=RSP_ID,
                          raw=raw)
+        if self._values[2] not in [0, 0xff]:
+            raise MessageError(f'unexpected data[2] {self._values[2]:#02x}')
 
 
 class MSG_srec_start_ok(RXMessage):
@@ -374,6 +393,7 @@ class CANInterface(object):
                                       bitrate=args.can_speed,
                                       sleep_after_open=0.2)
         self._verbose = args.verbose
+        self._have_power_control = args.interface_power_control
 
         # filter just the IDs we expect to see coming from the module
         # self._bus.set_filters([
@@ -405,13 +425,20 @@ class CANInterface(object):
         return None
 
     def set_power_off(self):
-        self.send(MSG_mjs_power(False, False))
+        if self._have_power_control:
+            self.send(MSG_mjs_power(False, False))
 
     def set_power_t30(self):
-        self.send(MSG_mjs_power(True, False))
+        if self._have_power_control:
+            self.send(MSG_mjs_power(True, False))
+        else:
+            print('NOTE: turn on power now...')
 
     def set_power_t30_t15(self):
-        self.send(MSG_mjs_power(True, True))
+        if self._have_power_control:
+            self.send(MSG_mjs_power(True, True))
+        else:
+            print('NOTE: turn on power now...')
 
     def detect(self):
         """
@@ -478,10 +505,213 @@ class CANInterface(object):
         return modules
 
 
-class Srecords(object):
+class S32_Srecords_(object):
+    '''Load and fix up S-records for S32-based targets'''
 
-    @classmethod
-    def sum(cls, srec):
+    class Srecord(object):
+        def __init__(self, flavor, address, data):
+            self._flavor = flavor
+            self._address = address
+            self._data = data
+
+        @classmethod
+        def from_line(cls, line):
+            if ((line[0] != 'S') or (line[1] not in '135790')):
+                raise RuntimeError(f'malformed or unsupported S-record header {line}')
+            count = int(f'0x{line[2:4]}', 16)
+            if len(line) != (count + 4):
+                raise RuntimeError(f'malformed S-record length {line}')
+            payload = bytes.fromHex(line[2:-2])
+
+            flavor = line[1]
+            check = int(f'0x{line[-2:]}', 16)
+
+            # parse selected S-records
+            if flavor == '0':
+                address = None
+                data = payload[2:].decode('ascii')
+            elif flavor == '1':
+                (address) = struct.unpack_from('<H', payload)
+                data = payload[2:]
+            elif flavor == '3':
+                (address) = struct.unpack_from('<I', payload)
+                data = payload[4:]
+            elif flavor == '5':
+                address = struct.unpack_from('<H', payload)
+                data = None
+            elif flavor == '7':
+                (address) = struct.unpack_from('<I', payload)
+                data = None
+            elif flavor == '9':
+                (address) = struct.unpack_from('<H', payload)
+                data = None
+
+            return Srecord(flavor, address, data)
+
+        @property
+        def flavor(self):
+            return self._flavor
+
+        @property
+        def address(self):
+            return self._address
+
+        @property
+        def data(self):
+            return self._data
+
+    def __init__(self, path, args, mcu_type):
+
+        # configure properties for the MCU
+        if mcu_type == 6:
+            # S32K144
+            self._flash_base = 0x10000
+            flash_limit = 0x80000
+        else:
+            raise RuntimeError(f'unsupported MCU type {mcu_type}')
+
+        # read the input file
+        try:
+            with path.open() as f:
+                lines = f.readlines()
+        except Exception as e:
+            raise RuntimeError(f'could not read S-records from {path}')
+
+        # convert lines to S-records
+        mem_records = dict()
+        self._image_entry = None
+        header_base = flash_limit
+        image_limit = self._flash_base
+        for line in lines:
+            srec = Srecord.from_line(line)
+
+            # flash data
+            if srec.flavor == '3':
+                limit = srec.address + len(srec.data)
+                if (srec.address < self._flash_base) or (limit > flash_limit):
+                    raise RuntimeError(f'data outside flashable area')
+                mem_records[srec.address] = srec.data
+                if limit > image_limit:
+                    image_limit = limit
+                if srec.address < app_base:
+                    app_base = srec.address
+
+            # entrypoint
+            if srec.flavor == '7':
+                self._image_entry = srec.address
+
+        # sanity-check the entrypoint
+        if self._image_entry is None:
+            raise RuntimeError(f'missing entrypoint')
+        if (self._image_entry < app_base) or (self._image_entry > image_limit):
+            raise RuntimeError(f'entrypoint outside app')
+
+        # image must start at base of flash
+        if header_base != self._flash_base:
+            raise RuntimeError(f'data does not start at base of flash')
+
+        # round the image limit up to a multiple of 256 (only for S32)
+        mod = image_limit % 256
+        if mod != 0:
+            image_limit += 256 - mod
+
+        # build the memory array, pad with zeros
+        self._mem_buf = bytearray(image_limit - self._flash_base)
+
+        # and fill it with srecord data
+        for srec in mem_records:
+            rec_offset = srec.address - self._flash_base
+            rec_limit = rec_offset + len(srec.data)
+            self._mem_buf[rec_offset:rec_limit] = srec.data
+
+        # do header fixups
+        self._fix_flash_header()
+
+    def _fix_flash_header(self):
+        # typedef struct
+        # {
+        #     uint32_t header_key;          default 0x12345678
+        #     uint32_t header_crc;          crc32 from 0x10008-0x10fff
+        #     uint32_t app_header_version;  default 1
+        #     uint32_t application_crc;     crc32 from 0x11000 of application_length
+        #     uint32_t application_length;  app length (multiple of 256)
+        #     uint8_t sw_version[32];       default "NO PROG"
+        #     uint8_t reserve[460];         zeros
+        #     uint8_t signature_key[512];   zeros
+        # } struct_hal_sys_app_header_t;
+        header_fmt = '<IIIII20s'
+
+        # parse the current header state
+        (header_key,
+         header_crc,
+         app_header_version,
+         application_crc,
+         application_length,
+         sw_version) = struct.unpack_from(header_fmt, mem_buf, 0)
+
+        if app_header_version != 1:
+            raise RuntimeError(f'unsupported flash header version {app_header_version}')
+
+        #  check whether the header has already been populated...
+        if application_crc == 0:
+            # compute the application CRC and length
+            application_crc = crc32(self._mem_buf[0x1000:])
+            application_length = len(self._mem_buf) - 0x1000
+
+            # Fill in the header
+            #
+            struct.pack_into(self._mem_buf, header_fmt, 0,
+                             0x12345678,            # header_key
+                             0,                     # header_crc
+                             1,                     # app_header_version
+                             application_crc,       # application_crc
+                             application_length,    # application_length
+                             'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0')
+
+            # compute the header CRC
+            header_crc = crc32(self._mem_buf[0x8:0x1000])
+
+            # rewrite the header with corrected CRC
+            struct.pack_into(self._mem_buf, header_fmt, 0,
+                             0x12345678,            # header_key
+                             header_crc,            # header_crc
+                             1,                     # app_header_version
+                             application_crc,       # application_crc
+                             application_length,    # application_length
+                             'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0')
+
+    @property
+    def text_records(self):
+        """generator yielding text S-records"""
+
+        for offset in range(0, len(self._mem_buf), 32):
+            address = self._flash_base + offset
+            data = self._mem_buf[offset:offset + 32]
+            yield(f'S325{address:08x}{data.hex()}{self.sum(data):02x}')
+
+        data = struct.pack('<I', self._image_entry)
+        yield(f'S705{data.hex()}{self.sum(data):02x}')
+
+    @property
+    def upload_records(self):
+        """generator yielding S-records in ready-to-send format"""
+        for srec in self.text_records:
+            # first two bytes to send are ascii, remainder are literals
+            yield bytearray(srec[0:2], 'ascii') + bytes.fromhex(srec[2:])
+
+    @staticmethod
+    def sum(data):
+        check = 0
+        for b in data:
+            check += b
+        return check & 0xff
+
+
+class HS08_Srecords(object):
+    '''read S-records and fix up for HCS08-based targets'''
+
+    @staticmethod
+    def sum(srec):
         count = int(f'0x{srec[2:4]}', 16)
         sum = 0
         for ofs in range(2, 2 + (count * 2), 2):
@@ -498,12 +728,15 @@ class Srecords(object):
         except Exception as e:
             raise RuntimeError(f'could not read S-records from {path}')
 
-        # populate the bytes array with data from the S1 records
+        # populate the bytes array with data from S1 records
         for line in lines:
             if line[0] != 'S':
                 raise RuntimeError(f'malformed S-record: {line}')
-            elif line[1] != '1':
-                # ignore anything that's not an S1 record
+            if line[1] in '2378':
+                raise RuntimeError(f'unsupported S{line[1]} record: {line}')
+            if line[1] != '1':
+                # ignore anything that's not an S1 record; we discard S[056],
+                # and fake S9 at the end
                 continue
 
             # get the starting address of the line
@@ -577,7 +810,7 @@ class Srecords(object):
                 byte_addr += 1
 
             srec = f"S1{(len(srec_hexbytes) >> 1) + 3:02X}{srec_addr:04X}{srec_hexbytes}"
-            srec += f"{Srecords.sum(srec):02X}"
+            srec += f"{self.sum(srec):02X}"
             yield srec
 
         yield "S9030000FC"
@@ -668,28 +901,22 @@ class Module(object):
                 raise ModuleError('did not see expected module '
                                   'progress message')
             try:
+                done = MSG_erase_done(rsp)
+                print('')
+                break
+            except MessageError as e:
+                pass
+            try:
                 progress = MSG_progress(rsp)
             except MessageError as e:
                 raise ModuleError(f'got unexpected message {rsp} '
-                                  f'instead of progress')
+                                  f'instead of erase progress / completion')
             self._print_progress(title, progress.limit, progress.progress)
-            if progress.progress == progress.limit:
-                break
 
     def _erase(self):
         """erase the currently-selected module"""
         self._interface.send(MSG_erase())
         self._erase_progress("ERASE ")
-        self._erase_progress("ERASE2")
-        rsp = self._interface.recv(2)
-        if rsp is None:
-            raise ModuleError('did not see expected module '
-                              'erase completed message')
-        try:
-            progress = MSG_erase_done(rsp)
-        except MessageError as e:
-            raise ModuleError(f'got unexpected message {rsp} '
-                              f'instead erase done')
 
     def _program(self, srecords):
         """flash srecords to the currently-selected module"""
@@ -722,12 +949,14 @@ class Module(object):
         self._erase()
         self._program(srecords)
 
-    def get_eeprom(self):
-        """get raw EEPROM contents"""
+    @property
+    def raw_properties(self):
+        """get raw EEPROM properties"""
         self._select()
         return self._read_eeprom(0, 0x800)
 
-    def get_eeprom_properties(self):
+    @property
+    def properties(self):
         """decode EEPROM contents"""
         self._select()
         header = self._read_eeprom(2, 2)
@@ -744,7 +973,7 @@ class Module(object):
                 value = value[0].decode('ascii')
             elif len(value) == 1:
                 value = value[0]
-            print(f'0x{offset + 0x1400:04x} : {name}')
+            # print(f'0x{offset + 0x1400:04x} : {name}')
             offset += field_len
             if name is not None:
                 properties[name] = value
@@ -762,11 +991,19 @@ class Module(object):
             rsp = self._interface.recv(0.02)
 
 
-def do_upload(interface, args):
+def do_upload(module, args):
     """implement the --upload option"""
-    srecords = Srecords(args.upload, args)
-    module_id = interface.detect()
-    module = Module(interface, module_id, args)
+
+    mcu_type = int(module.properties['MCU_Type'])
+
+    # detect module type, handle Srecords appropriately
+    if mcu_type == 1:
+        srecords = HCS08_Srecords(args.upload, args)
+    if mcu_type in [6, 8]:
+        srecords = S32_Srecords(args.upload, args, mcu_type)
+    else:
+        raise RuntimeError(f'Unsupported module MCU {mcu_type}')
+
     module.upload(srecords)
 
     if not args.console:
@@ -808,37 +1045,31 @@ def do_console(interface, args):
             line = ''
 
 
-def do_erase(interface, args):
+def do_erase(module, args):
     """implement the --erase option"""
-    module_id = interface.detect()
-    module = Module(interface, module_id, args)
     module.erase()
 
 
-def do_eeprom_dump(interface, args):
+def do_eeprom_dump(module, args):
     """implement the --dump-eeprom option"""
-    module_id = interface.detect()
-    module = Module(interface, module_id, args)
-    contents = module.get_eeprom()
+    contents = module.raw_properties
     print(contents)
 
 
-def do_eeprom_decode(interface, args):
+def do_eeprom_decode(module, args):
     """implement the --decode-eeprom option"""
-    module_id = interface.detect()
-    module = Module(interface, module_id, args)
-    properties = module.get_eeprom_properties()
+    properties = module.properties
     for name, value in properties.items():
         print(f'{name:<30} {value}')
 
 
-def do_print_srecords(srec_file, args):
-    srecords = Srecords(srec_file, args)
+def do_print_hcs08_srecords(srec_file, args):
+    srecords = HCS08_Srecords(srec_file, args)
     for srec in srecords.text_records:
         print(srec)
 
 
-parser = argparse.ArgumentParser(description='MRS Microplex 7* CAN flasher')
+parser = argparse.ArgumentParser(description='MRS Microplex 7* and CC16 CAN flasher')
 parser.add_argument('--interface',
                     type=str,
                     metavar='INTERFACE_NAME',
@@ -848,6 +1079,10 @@ parser.add_argument('--interface-type',
                     metavar='INTERFACE_TYPE',
                     default='slcan',
                     help='interface type')
+parser.add_argument('--interface-power-control',
+                    action='store_true',
+                    default=True,
+                    help='whether the interface supports MJS power control (SLCAN only)')
 parser.add_argument('--can-speed',
                     type=int,
                     default=125000,
@@ -880,10 +1115,14 @@ actiongroup.add_argument('--dump-eeprom',
 actiongroup.add_argument('--decode-eeprom',
                          action='store_true',
                          help='decode the contents of the module EEPROM')
-actiongroup.add_argument('--print-fixed-srecords',
+actiongroup.add_argument('--print-fixed-hcs08-srecords',
                          type=Path,
                          metavar='SRECORD_FILE',
-                         help='translate an S-record file as it would be for upload')
+                         help='translate an S-record file as it would be for upload to an HCS08 module')
+actiongroup.add_argument('--print-fixed-s32k-srecords',
+                         type=Path,
+                         metavar='SRECORD_FILE',
+                         help='translate an S-record file as it would be for upload to an S32K module')
 
 
 args = parser.parse_args()
@@ -895,24 +1134,28 @@ else:
     def log(msg):
         pass
 try:
-    if args.print_fixed_srecords is not None:
-        do_print_srecords(args.print_fixed_srecords, args)
+    if args.print_fixed_hcs08_srecords is not None:
+        do_print_hcs08_srecords(args.print_fixed_hcs08_srecords, args)
+    elif args.print_fixed_s32k_srecords is not None:
+        do_print_s32k_srecords(args.print_fixed_s32k_srecords, args)
     else:
         if args.interface is None:
             raise RuntimeError("--interface not specified")
         interface = CANInterface(args)
+        module_id = interface.detect()
+        module = Module(interface, module_id, args)
         if args.upload is not None:
-            do_upload(interface, args)
+            do_upload(module, args)
             if args.kl15_after_upload:
                 interface.set_power_t30_t15()
             if args.console:
                 do_console(interface, args)
         elif args.erase:
-            do_erase(interface, args)
+            do_erase(module, args)
         elif args.dump_eeprom:
-            do_eeprom_dump(interface, args)
+            do_eeprom_dump(module, args)
         elif args.decode_eeprom:
-            do_eeprom_decode(interface, args)
+            do_eeprom_decode(module, args)
 except KeyboardInterrupt:
     pass
 if interface is not None:
