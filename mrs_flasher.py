@@ -6,9 +6,16 @@
 # optimised for use with a homebrew adapter that supports power
 # control.
 #
+# If power control is not available, start the script with module
+# power off, then turn it on within a few seconds. Unlike the MRS
+# programmers which depend on the application participating in
+# the reboot-to-flash process, this script captures the module in
+# the bootloader immediately out of reset, and so it works even
+# if the application is bad.
+#
 # (The MRS adapter has the ability to switch T30 and T15, but
 #  their software doesn't appear to actually exploit it as a way
-#  of recovering bricked units...)
+#  of recovering bricked units.)
 #
 # Newer S-record input includes S0 records denoting the intended
 # target device part / order numbers and hardware revisions, e.g.:
@@ -36,48 +43,47 @@ DATA_ID = 0x1ffffff4
 
 # Programmer-specific messages
 CONSOLE_ID = 0x1ffffffe
-MJS_POWER_ID = 0x0fffffff
+MODULE_POWER_ID = 0x0fffffff
 
-
-EEPROM_STARTKENNER = 1331
-EEPROM_MAP = [
-    # (format, name)
-    # ('2B' '??'),
-    # ('>H' 'Startkenner'),
-    ('>I',  'Serial_Number'),
-    ('12s', 'Part_Number'),
-    ('12s', 'Drawing_Number'),
+# Module parameters (stored in EEPROM)
+PARAMETER_MAGIC = 1331
+PARAMETER_MAP = [
+    ('2B',  '_'),
+    ('>H',  '_ParameterMagic'),
+    ('>I',  'SerialNumber'),
+    ('12s', 'PartNumber'),
+    ('12s', 'DrawingNumber'),
     ('20s', 'Name'),
-    ('8s',  'Order_Number'),
-    ('8s',  'Test_Date'),
-    ('>H',  'HW_Version'),
-    ('B',   'Reset_Counter'),
-    ('>H',  'Library_Version'),
-    ('B',   'ResetReasonCounter_LVD'),
-    ('B',   'ResetReasonCounter_LOC'),
-    ('B',   'ResetReasonCounter_ILAD'),
-    ('B',   'ResetReasonCounter_ILOP'),
-    ('B',   'ResetReasonCounter_COP'),
-    ('B',   'MCU_Type'),
-    ('B',   'HW_CAN_Active'),
-    ('3B',  'Bootloader_Werksdaten_Reserve1'),
-    ('>H',  'Bootloader_Version'),
-    ('>H',  'Prog_State'),
+    ('8s',  'OrderNumber'),
+    ('8s',  'TestDate'),
+    ('>H',  'HardwareVersion'),
+    ('B',   'ResetCounter'),
+    ('>H',  'LibraryVersion'),
+    ('B',   'ResetReasonCounterLVD'),
+    ('B',   'ResetReasonCounterLOC'),
+    ('B',   'ResetReasonCounterILAD'),
+    ('B',   'ResetReasonCounterILOP'),
+    ('B',   'ResetReasonCounterCOP'),
+    ('B',   'MicrocontrollerType'),
+    ('B',   'HardwareCANActive'),
+    ('3B',  'BootloaderReserved1'),
+    ('>H',  'BootloaderVersion'),
+    ('>H',  'ProgramState'),
     ('>H',  'Portbyte1'),
     ('>H',  'Portbyte2'),
-    ('>H',  'Baudrate_Bootloader1'),
-    ('>H',  'Baudrate_Bootloader2'),
-    ('B',   'Bootloader_ID_Ext1'),
-    ('>I',  'Bootloader_ID1'),
-    ('B',   'Bootloader_ID_CRC1'),
-    ('B',   'Bootloader_ID_Ext2'),
-    ('>I',  'Bootloader_ID2'),
-    ('B',   'Bootloader_ID_CRC2'),
-    ('20s', 'Sofware_Version'),
-    ('30s', 'Module_Name'),
-    ('B',   'BL_CAN_Bus'),
-    ('>H',  'COP_WD_Timeout'),
-    ('7B',  'Bootloader_Configdaten_Reserve1')
+    ('>H',  'BaudrateBootloader1'),
+    ('>H',  'BaudrateBootloader2'),
+    ('B',   'BootloaderIDExt1'),
+    ('>I',  'BootloaderID1'),
+    ('B',   'BootloaderIDCRC1'),
+    ('B',   'BootloaderIDExt2'),
+    ('>I',  'BootloaderID2'),
+    ('B',   'BootloaderIDCRC2'),
+    ('20s', 'SofwareVersion'),
+    ('30s', 'ModuleName'),
+    ('B',   'BootloaderCANBus'),
+    ('>H',  'COPWatchdogTimeout'),
+    ('7B',  'BootloaderReserved2')
 ]
 
 
@@ -95,8 +101,8 @@ class TXMessage(can.Message):
     """
     Abstract for messages that will be sent.
 
-    Concrete classes set self._format and pass args to struct.pack()
-    that format to __init__.
+    Concrete classes set self._format, and pass corresponding
+    arguments to __init__.
     """
     def __init__(self, arbitration_id, *args):
         super().__init__(arbitration_id=arbitration_id,
@@ -105,8 +111,8 @@ class TXMessage(can.Message):
                          data=struct.pack(self._format, *args))
 
 
-class MSG_mjs_power(TXMessage):
-    """mjs adapter power control message"""
+class MSG_module_power(TXMessage):
+    """module power control message"""
     _format = 'B'
 
     def __init__(self, t30_state, t15_state):
@@ -116,7 +122,7 @@ class MSG_mjs_power(TXMessage):
             arg = 0x01
         else:
             arg = 0x03
-        super().__init__(MJS_POWER_ID, arg)
+        super().__init__(MODULE_POWER_ID, arg)
 
 
 class MSG_ping(TXMessage):
@@ -393,7 +399,6 @@ class CANInterface(object):
                                       bitrate=args.can_speed,
                                       sleep_after_open=0.2)
         self._verbose = args.verbose
-        self._have_power_control = args.interface_power_control
 
         # filter just the IDs we expect to see coming from the module
         # self._bus.set_filters([
@@ -425,20 +430,13 @@ class CANInterface(object):
         return None
 
     def set_power_off(self):
-        if self._have_power_control:
-            self.send(MSG_mjs_power(False, False))
+        self.send(MSG_module_power(False, False))
 
     def set_power_t30(self):
-        if self._have_power_control:
-            self.send(MSG_mjs_power(True, False))
-        else:
-            print('NOTE: turn on power now...')
+        self.send(MSG_module_power(True, False))
 
     def set_power_t30_t15(self):
-        if self._have_power_control:
-            self.send(MSG_mjs_power(True, True))
-        else:
-            print('NOTE: turn on power now...')
+        self.send(MSG_module_power(True, True))
 
     def detect(self):
         """
@@ -452,15 +450,14 @@ class CANInterface(object):
             pass
         self.set_power_t30()
         while True:
-            rsp = self.recv(2)
+            rsp = self.recv(5)
             if rsp is None:
                 raise ModuleError('no power-on message from module')
             try:
                 signon = MSG_ack(rsp)
                 break
             except MessageError as e:
-                raise ModuleError(f'unexpected power-on message '
-                                  f'from module: {rsp}')
+                raise ModuleError(f'unexpected power-on message from module: {rsp}')
         self.send(MSG_ping())
         rsp = self.recv()
         if rsp is None:
@@ -829,6 +826,9 @@ class Module(object):
         self._module_id = module_id
         self._verbose = args.verbose
 
+#        if self.parameter('_ParameterMagic') != PARAMETER_MAGIC:
+#            print(f'WARNING: EEPROM may be corrupted - bad magic number')
+
     def _cmd(self, message):
         """send a message, wait for a response"""
         self._interface.send(message)
@@ -847,6 +847,7 @@ class Module(object):
 
     def _read_eeprom(self, address, length):
         """read bytes from the EEPROM"""
+        self._select()
         result = bytearray()
         while length > 0:
             amount = length if length <= 8 else 8
@@ -861,7 +862,7 @@ class Module(object):
         while True:
             rsp = self._interface.recv(timeout)
             if rsp is None:
-                raise ModuleError('did not see module reboot message')
+                raise ModuleError('timed out waiting for module reboot message')
             try:
                 boot_message = MSG_ack(rsp)
                 if boot_message.module_id != self._module_id:
@@ -893,13 +894,13 @@ class Module(object):
         if position == limit:
             print('')
 
-    def _erase_progress(self, title):
-        """monitor erase progress"""
+    def _erase(self):
+        """erase the currently-selected module"""
+        self._interface.send(MSG_erase())
         while True:
             rsp = self._interface.recv(2)
             if rsp is None:
-                raise ModuleError('did not see expected module '
-                                  'progress message')
+                raise ModuleError('timed out waiting for module progress message')
             try:
                 done = MSG_erase_done(rsp)
                 print('')
@@ -911,12 +912,7 @@ class Module(object):
             except MessageError as e:
                 raise ModuleError(f'got unexpected message {rsp} '
                                   f'instead of erase progress / completion')
-            self._print_progress(title, progress.limit, progress.progress)
-
-    def _erase(self):
-        """erase the currently-selected module"""
-        self._interface.send(MSG_erase())
-        self._erase_progress("ERASE ")
+            self._print_progress("ERASE", progress.limit, progress.progress)
 
     def _program(self, srecords):
         """flash srecords to the currently-selected module"""
@@ -940,44 +936,44 @@ class Module(object):
                 return
             except MessageError:
                 continue
-        raise ModuleError(f'expected S-record end OK message, but not received'
-                          f' - check S-records for S9 at end')
+        raise ModuleError(f'timed out waiting for S-record end OK message')
+
+    def parameter(self, parameter_name):
+        """look up a parameter by name"""
+
+        # find it in the parameter map
+        offset = 0
+        address = None
+        for fmt, name in PARAMETER_MAP:
+            length = struct.calcsize(fmt)
+            if name == parameter_name:
+                address = offset
+                break
+            offset += length
+        if address is None:
+            raise RuntimeError(f'attempt to lookup non-existent parameter {parameter_name}')
+
+        # read it from the EEPROM and make it usable
+        value = struct.unpack(fmt, self._read_eeprom(address, length))
+        if fmt[-1] == 's':
+            value = value[0].decode('ascii')
+        elif len(value) == 1:
+            value = value[0]
+        return value
+
+    @property
+    def parameter_names(self):
+        """generator yielding valid parameter names"""
+        for (_, name) in PARAMETER_MAP:
+            # ignore hidden names
+            if name[0] != '_':
+                yield name
 
     def upload(self, srecords):
         """flash the module with the supplied program"""
         self._enter_flash_mode()
         self._erase()
         self._program(srecords)
-
-    @property
-    def raw_properties(self):
-        """get raw EEPROM properties"""
-        self._select()
-        return self._read_eeprom(0, 0x800)
-
-    @property
-    def properties(self):
-        """decode EEPROM contents"""
-        self._select()
-        header = self._read_eeprom(2, 2)
-        (magic,) = struct.unpack(">H", header)
-        if magic != EEPROM_STARTKENNER:
-            print(f'WARNING: EEPROM magic number incorrect ({magic})')
-        offset = 4
-        properties = dict()
-        for fmt, name in EEPROM_MAP:
-            field_len = struct.calcsize(fmt)
-            bytes = self._read_eeprom(offset, field_len)
-            value = struct.unpack(fmt, bytes)
-            if fmt[-1] == 's':
-                value = value[0].decode('ascii')
-            elif len(value) == 1:
-                value = value[0]
-            # print(f'0x{offset + 0x1400:04x} : {name}')
-            offset += field_len
-            if name is not None:
-                properties[name] = value
-        return properties
 
     def erase(self):
         """erase the module"""
@@ -994,9 +990,8 @@ class Module(object):
 def do_upload(module, args):
     """implement the --upload option"""
 
-    mcu_type = int(module.properties['MCU_Type'])
-
     # detect module type, handle Srecords appropriately
+    mcu_type = module.property('MCU_Type')
     if mcu_type == 1:
         srecords = HCS08_Srecords(args.upload, args)
     if mcu_type in [6, 8]:
@@ -1050,17 +1045,10 @@ def do_erase(module, args):
     module.erase()
 
 
-def do_eeprom_dump(module, args):
-    """implement the --dump-eeprom option"""
-    contents = module.raw_properties
-    print(contents)
-
-
-def do_eeprom_decode(module, args):
-    """implement the --decode-eeprom option"""
-    properties = module.properties
-    for name, value in properties.items():
-        print(f'{name:<30} {value}')
+def do_print_parameters(module, args):
+    """implement the --print-module_parameters option"""
+    for name in module.parameter_names:
+        print(f'{name:<30} {module.parameter(name)}')
 
 
 def do_print_hcs08_srecords(srec_file, args):
@@ -1079,10 +1067,6 @@ parser.add_argument('--interface-type',
                     metavar='INTERFACE_TYPE',
                     default='slcan',
                     help='interface type')
-parser.add_argument('--interface-power-control',
-                    action='store_true',
-                    default=True,
-                    help='whether the interface supports MJS power control (SLCAN only)')
 parser.add_argument('--can-speed',
                     type=int,
                     default=125000,
@@ -1109,12 +1093,9 @@ actiongroup.add_argument('--upload',
 actiongroup.add_argument('--erase',
                          action='store_true',
                          help='erase the program')
-actiongroup.add_argument('--dump-eeprom',
+actiongroup.add_argument('--print-module-parameters',
                          action='store_true',
-                         help='dump the contents of the module EEPROM')
-actiongroup.add_argument('--decode-eeprom',
-                         action='store_true',
-                         help='decode the contents of the module EEPROM')
+                         help='print all module parameters')
 actiongroup.add_argument('--print-fixed-hcs08-srecords',
                          type=Path,
                          metavar='SRECORD_FILE',
@@ -1152,10 +1133,8 @@ try:
                 do_console(interface, args)
         elif args.erase:
             do_erase(module, args)
-        elif args.dump_eeprom:
-            do_eeprom_dump(module, args)
-        elif args.decode_eeprom:
-            do_eeprom_decode(module, args)
+        elif args.print_module_parameters:
+            do_print_parameters(module, args)
 except KeyboardInterrupt:
     pass
 if interface is not None:
