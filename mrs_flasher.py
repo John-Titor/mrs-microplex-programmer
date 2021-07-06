@@ -989,24 +989,31 @@ class Module(object):
         progress = 1
         records = list(srecords.upload_records)
         for srec in records:
+            # blast the entire S-record without waiting for flow control
             for index in range(0, len(srec), 8):
-                rsp = self._cmd(MSG_srecord(srec[index:index+8]))
-            if rsp is None:
-                raise ModuleError(f'timed out waiting for response')
+                self._interface.send(MSG_srecord(srec[index:index+8]))
+
+            while True:
+                rsp = self._interface.recv(2)
+                if rsp is None:
+                    raise ModuleError(f'timed out waiting for S-record ack')
+                if rsp.data[0] != 0:
+                    raise ModuleError(f'module rejected S-record')
+                try:
+                    ack = MSG_srec_end_ok(rsp)
+                    break
+                except MessageError:
+                    pass
+                try:
+                    ack = MSG_srecords_done(rsp)
+                    log(f'DONE: {rsp}')
+                    print('')
+                    return
+                except MessageError:
+                    pass
 
             self._print_progress("FLASH", len(records), progress)
             progress += 1
-
-            if rsp.data[0] != 0:
-                raise ModuleError(f'module rejected S-record')
-            try:
-                ack = MSG_srecords_done(rsp)
-                log(f'DONE: {rsp}')
-                print('')
-                return
-            except MessageError:
-                continue
-        raise ModuleError(f'timed out waiting for S-record end OK message')
 
     def parameter(self, parameter_name):
         """look up a parameter by name"""
