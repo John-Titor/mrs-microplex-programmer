@@ -59,14 +59,14 @@ PARAMETER_MAP = [
     ('>H',  'HardwareVersion'),
     ('B',   'ResetCounter'),
     ('>H',  'LibraryVersion'),
-    ('B',   'ResetReasonCounterLVD'),
-    ('B',   'ResetReasonCounterLOC'),
-    ('B',   'ResetReasonCounterILAD'),
-    ('B',   'ResetReasonCounterILOP'),
-    ('B',   'ResetReasonCounterCOP'),
-    ('B',   'MicrocontrollerType'),
+    ('B',   'ResetReasonLVD'),
+    ('B',   'ResetReasonLOC'),
+    ('B',   'ResetReasonILAD'),
+    ('B',   'ResetReasonILOP'),
+    ('B',   'ResetReasonCOP'),
+    ('B',   'MCUType'),
     ('B',   'HardwareCANActive'),
-    ('3B',  'BootloaderReserved1'),
+    ('3B',  'Reserved1'),
     ('>H',  'BootloaderVersion'),
     ('>H',  'ProgramState'),
     ('>H',  'Portbyte1'),
@@ -83,7 +83,7 @@ PARAMETER_MAP = [
     ('30s', 'ModuleName'),
     ('B',   'BootloaderCANBus'),
     ('>H',  'COPWatchdogTimeout'),
-    ('7B',  'BootloaderReserved2')
+    ('7B',  'Reserved2')
 ]
 
 
@@ -191,7 +191,8 @@ class RXMessage(object):
         if raw.arbitration_id != expected_id:
             raise MessageError(f'expected reply with ID 0x{expected_id:x} '
                                f'but got {raw}')
-        if raw.dlc != struct.calcsize(self._format):
+        expected_dlc = struct.calcsize(self._format)
+        if raw.dlc != expected_dlc:
             raise MessageError(f'expected reply with length {expected_dlc} '
                                f'but got {raw}')
 
@@ -397,7 +398,8 @@ class CANInterface(object):
         self._bus = can.interface.Bus(bustype=args.interface_type,
                                       channel=args.interface,
                                       bitrate=args.can_speed,
-                                      sleep_after_open=0.2)
+                                      sleep_after_open=0.2,
+                                      ttyBaudrate=args.interface_speed)
         self._verbose = args.verbose
 
         # filter just the IDs we expect to see coming from the module
@@ -500,6 +502,7 @@ class CANInterface(object):
             else:
                 break
         return modules
+
 
 class Srecord(object):
     """S-record line parser for 16- and 32-bit address records"""
@@ -767,7 +770,7 @@ class S32K_Srecords(object):
             yield bytearray(srec[0:2], 'ascii') + bytes.fromhex(srec[2:])
 
 
-class HS08_Srecords(object):
+class HCS08_Srecords(object):
     '''read S-records and fix up for HCS08-based targets'''
 
     @staticmethod
@@ -807,19 +810,23 @@ class HS08_Srecords(object):
             # log(f"{address:04x}: {hexbytes}")
             self._insert_bytes(address, hexbytes)
 
-        # locate the reset vector
-        self._entry = self._vector(0)
-        if self._entry is None:
-            raise RuntimeError("no reset vector")
+        # do we need to patch vectors into the thunk table, or does
+        # this image already have them?
+        if self._word(0xaffd) is None:
 
-        # extract vectors and patch them into the thunk space
-        try:
-            default_vector = self._vector(32)
-        except KeyError:
-            default_vector = self._entry
+            # locate the reset vector
+            self._entry = self._vector(0)
+            if self._entry is None:
+                raise RuntimeError("no reset vector")
 
-        for number in range(0, 32):
-            self._insert_thunk(number, default_vector)
+            # extract vectors and patch them into the thunk space
+            try:
+                default_vector = self._vector(32)
+            except KeyError:
+                default_vector = self._entry
+
+            for number in range(0, 32):
+                self._insert_thunk(number, default_vector)
 
         # prune values outside the writable ROM space
         for address in sorted(self._hexbytes):
@@ -1054,11 +1061,11 @@ def do_upload(module, args):
     """implement the --upload option"""
 
     # detect module type, handle Srecords appropriately
-    mcu_type = module.property('MCU_Type')
+    mcu_type = module.parameter('MCUType')
     if mcu_type == 1:
         srecords = HCS08_Srecords(args.upload, args)
-    if mcu_type in [6, 8]:
-        srecords = S32_Srecords(args.upload, args, mcu_type)
+    elif mcu_type in [6, 8]:
+        srecords = S32K_Srecords(args.upload, args, mcu_type)
     else:
         raise RuntimeError(f'Unsupported module MCU {mcu_type}')
 
@@ -1136,6 +1143,11 @@ parser.add_argument('--interface-type',
                     metavar='INTERFACE_TYPE',
                     default='slcan',
                     help='interface type')
+parser.add_argument('--interface-speed',
+                    type=int,
+                    default=115200,
+                    metavar='INTERFACE-SPEED',
+                    help='speed for the CAN interface (varies depending on --interface-type)')
 parser.add_argument('--can-speed',
                     type=int,
                     default=125000,
