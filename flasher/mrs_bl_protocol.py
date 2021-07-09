@@ -582,11 +582,11 @@ class Module(object):
 
     def _print_progress(self, title, limit, position):
         scale = 60 / limit
+        if position > limit:
+            position = limit
         hashes = int(position * scale)
         bar = '#' * hashes + '.' * (60 - hashes)
         print(f'\r{title:<8} [{bar}] {position}/{limit}', end='')
-        if position == limit:
-            print('')
 
     def _erase(self):
         """erase the currently-selected module"""
@@ -606,40 +606,63 @@ class Module(object):
             except MessageError as e:
                 raise ModuleError(f'got unexpected message {rsp} '
                                   f'instead of erase progress / completion')
-            self._print_progress("ERASE", progress.limit, progress.progress)
+            self._print_progress("ERASE", progress.limit - 1, progress.progress)
 
     def _program(self, srecords):
         """flash srecords to the currently-selected module"""
         progress = 1
         records = list(srecords.upload_records)
-        for srec in records:
-            for index in range(0, len(srec), 8):
-                rsp = self._cmd(MSG_srecord(srec[index:index+8]))
-                if rsp is None:
-                    raise ModuleError(f'timed out waiting for S-record ack')
-                if rsp.DATA[0] != 0:
-                    raise ModuleError(f'module rejected S-record')
+        memory_records = records[:-1]
+        terminal_record = records[-1]
+
+        # send memory records (S[13])
+        #
+        # expected response varies based on whether this is the first, 
+        # intermediate or last fragment of a record.
+        progress = 0
+        progress_limit = len(memory_records) - 1
+        for srec in memory_records:
+
+            self._print_progress("FLASH", progress_limit, progress)
+            progress += 1
+
+            # do we have enough to send an initial fragment?
+            if len(srec) > 8:
+                rsp = self._cmd(MSG_srecord(srec[:8]))
+                srec = srec[8:]
                 try:
-                    ack = MSG_srecords_done(rsp)
-                    break
-                except MessageError:
-                    pass
-                try:
-                    if index == 0:
-                        ack = MSG_srec_start_ok(rsp)
-                    elif (index + 8) >= len(srec):
-                        ack = MSG_srec_end_ok(rsp)
-                    else:
-                        ack = MSG_srec_cont_ok(rsp)
+                    ack = MSG_srec_start_ok(rsp)
                 except MessageError:
                     raise ModuleError(f'unexpected response to S-record {rsp}')
 
-            self._print_progress("FLASH", len(records), progress)
-            progress += 1
+            # do we have enough to send intermediate fragments?
+            while len(srec) > 8:
+                rsp = self._cmd(MSG_srecord(srec[:8]))
+                srec = srec[8:]
+                try:
+                    ack = MSG_srec_cont_ok(rsp)
+                except MessageError:
+                    raise ModuleError(f'unexpected response to S-record {rsp}')
 
-            if type(ack) == MSG_srecords_done:
-                print('')
-                return
+            # send the last fragment of the record
+            rsp = self._cmd(MSG_srecord(srec[:8]))
+            srec = srec[8:]
+            try:
+                ack = MSG_srec_end_ok(rsp)
+            except MessageError:
+                raise ModuleError(f'unexpected response to S-record {rsp}')
+
+        # send the terminal record
+        rsp = self._cmd(MSG_srecord(terminal_record))
+        try:
+            ack = MSG_srecords_done(rsp)
+        except MessageError:
+            raise ModuleError(f'unexpected response to terminal S-record {rsp}')
+        print('')
+
+        # The module will start running the program (or try at least). HCS08 modules
+        # will reset; S32K modules just jump to the program, so the output from this
+        # point on varies considerably.
 
     def parameter(self, parameter_name):
         """look up a parameter by name"""
@@ -682,6 +705,18 @@ class Module(object):
         """erase the module"""
         self._enter_flash_mode()
         self._erase()
+
+    def get_console_data(self):
+        """fetch console packets"""
+        msg = self._interface.recv(1)
+        if msg is not None:
+            try:
+                status = MSG_ack(msg)
+                print(f'module reset due to {status.reason}')
+            except MessageError:
+                pass
+            if msg.raw.ID == CONSOLE_ID:
+                return msg.raw.DATA
 
     def x(self):
         """hacking"""

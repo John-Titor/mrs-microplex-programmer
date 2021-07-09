@@ -31,7 +31,7 @@
 # the module.
 #
 
-import argparse
+import argparse, time
 from pathlib import Path
 
 from mrs_srecord import S32K_Srecords, HCS08_Srecords
@@ -53,27 +53,12 @@ def do_upload(module, args):
     module.upload(srecords)
 
 
-def do_console(interface, args):
+def do_console(module, args):
     """implement the --console option"""
     line = ''
     while True:
-        msg = interface.recv(1)
-        if msg is not None:
-            try:
-                status = MSG_no_program(msg)
-                raise RuntimeError('bootloader rejected program, '
-                                   + 'may be missing reset vector')
-            except MessageError:
-                pass
-            try:
-                status = MSG_ack(msg)
-                raise RuntimeError(f'module reset due to {status.reason}')
-            except MessageError:
-                pass
-            if msg.arbitration_id != CONSOLE_ID:
-                print(msg)
-            else:
-                line += msg.data.decode()
+        fragment = module.get_console_data()
+        line += fragment.decode()
         if line.endswith('\0'):
             print(line)
             line = ''
@@ -111,6 +96,9 @@ parser.add_argument('--can-speed',
 parser.add_argument('--console',
                     action='store_true',
                     help='monitor console messages after upload')
+parser.add_argument('--power-cycle-after-upload',
+                    action='store_true',
+                    help='cycle power and leave KL30 on after upload')
 parser.add_argument('--kl15-after-upload',
                     action='store_true',
                     help='turn KL15 on after upload')
@@ -154,7 +142,9 @@ else:
         module = Module(interface, module_id, args)
         if args.upload is not None:
             do_upload(module, args)
-            if args.kl15_after_upload:
+            if args.power_cycle_after_upload:
+                interface.set_power_off()
+                time.sleep(0.25)
                 interface.set_power_t30_t15()
             if args.console:
                 do_console(interface, args)
@@ -163,6 +153,5 @@ else:
         elif args.print_module_parameters:
             do_print_parameters(module, args)
     except KeyboardInterrupt:
-        pass
-    if interface is not None:
-        interface.set_power_off()
+        if interface is not None:
+            interface.set_power_off()

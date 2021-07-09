@@ -218,25 +218,25 @@ class S32K_Srecords(object):
         else:
             # Fill in the header with the computed app CRC and size
             #
-            struct.pack_into(self._mem_buf, header_fmt, 0,
+            struct.pack_into(header_fmt, self._mem_buf, 0,
                              0x12345678,        # header_key
                              0,                 # header_crc
                              1,                 # app_header_version
                              new_app_crc,       # application_crc
                              new_app_length,    # application_length
-                             'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0')
+                             'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0'.encode('ascii'))
 
             # compute the header CRC
             new_hdr_crc = crc32(self._mem_buf[0x8:0x1000])
 
             # rewrite the header with the computed header CRC
-            struct.pack_into(self._mem_buf, header_fmt, 0,
+            struct.pack_into(header_fmt, self._mem_buf, 0,
                              0x12345678,        # header_key
                              new_hdr_crc,       # header_crc
                              1,                 # app_header_version
                              new_app_crc,       # application_crc
                              new_app_length,    # application_length
-                             'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0')
+                             'NO_PROG\0\0\0\0\0\0\0\0\0\0\0\0\0'.encode('ascii'))
 
         # Note also FlashConfiguration section just after vectors:
         #
