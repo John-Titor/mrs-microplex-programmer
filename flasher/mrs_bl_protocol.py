@@ -621,9 +621,7 @@ class Module(object):
                     raise ModuleError(f'module rejected S-record')
                 try:
                     ack = MSG_srecords_done(rsp)
-                    print(f'\nDONE')
-                    print('')
-                    return
+                    break
                 except MessageError:
                     pass
                 try:
@@ -638,6 +636,10 @@ class Module(object):
 
             self._print_progress("FLASH", len(records), progress)
             progress += 1
+
+            if type(ack) == MSG_srecords_done:
+                print('')
+                return
 
     def parameter(self, parameter_name):
         """look up a parameter by name"""

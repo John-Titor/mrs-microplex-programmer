@@ -196,9 +196,6 @@ class S32K_Srecords(object):
          application_length,
          sw_version) = struct.unpack_from(header_fmt, self._mem_buf, 0)
 
-        if app_header_version != 1:
-            raise RuntimeError(f'unsupported flash header version {app_header_version}')
-
         # compute the application CRC and length
         new_app_crc = crc32(self._mem_buf[0x1000:])
         new_app_length = len(self._mem_buf) - 0x1000
@@ -206,6 +203,9 @@ class S32K_Srecords(object):
         #  check whether the header has already been populated...
         if application_crc != 0:
 
+            # check the magic number
+            if app_header_version != 1:
+                raise RuntimeError(f'unsupported flash header version {app_header_version}')
             # verify that the header matches our expectations
             if application_length != new_app_length:
                 raise RuntimeError(f'app length mismatch {new_app_length} != {application_length}')
