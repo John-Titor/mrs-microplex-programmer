@@ -49,13 +49,18 @@ PARAMETER_MAP = [
     ('B',   'BootloaderIDExt2'),
     ('>I',  'BootloaderID2'),
     ('B',   'BootloaderIDCRC2'),
-    ('20s', 'SofwareVersion'),
+    ('20s', 'SoftwareVersion'),
     ('30s', 'ModuleName'),
     ('B',   'BootloaderCANBus'),
     ('>H',  'COPWatchdogTimeout'),
     ('7B',  'Reserved2')
 ]
 
+def print_param_offsets():
+    offset = 0;
+    for fmt, name in PARAMETER_MAP:
+        print(f'{offset:#02x}: {name}')
+        offset += struct.calcsize(fmt)
 
 def _str_TPCANMsg(msg):
     s = f'{msg.ID:#010x}:{msg.LEN}:'
@@ -500,6 +505,19 @@ class Interface(object):
                 break
         return modules
 
+    def get_console_data(self):
+        """fetch console packets"""
+        while True:
+            msg = self.recv(1)
+            if msg is not None:
+                try:
+                    status = MSG_ack(msg)
+                    print(f'module reset due to {status.reason}')
+                except MessageError:
+                    pass
+                if msg.ID == CONSOLE_ID:
+                    return msg.DATA
+
     def _drain(self):
         self._pcan.Reset(self._channel)
         while True:
@@ -581,6 +599,8 @@ class Module(object):
         ready = MSG_program_ack(rsp)
 
     def _print_progress(self, title, limit, position):
+        if limit < 1:
+            limit = 1
         scale = 60 / limit
         if position > limit:
             position = limit
@@ -705,18 +725,6 @@ class Module(object):
         """erase the module"""
         self._enter_flash_mode()
         self._erase()
-
-    def get_console_data(self):
-        """fetch console packets"""
-        msg = self._interface.recv(1)
-        if msg is not None:
-            try:
-                status = MSG_ack(msg)
-                print(f'module reset due to {status.reason}')
-            except MessageError:
-                pass
-            if msg.raw.ID == CONSOLE_ID:
-                return msg.raw.DATA
 
     def x(self):
         """hacking"""

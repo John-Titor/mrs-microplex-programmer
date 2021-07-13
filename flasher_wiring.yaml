@@ -1,0 +1,69 @@
+#
+# WireViz diagram for the Microplex-based flasher.
+#
+# The "control" Microplex can be created using the standard MRS studio or Microplex Studio setup.
+# Add:
+#
+#   os_pin_write(DO_HSD_1, 1);
+#
+# to usercode_init(), and:
+#
+#   if ((msg->id == 0x0fffffff) && (msg->id_ext == 1) && (msg->len == 1)) {
+#       os_pin_write(DO_HSD_1, msg->data[0] & 0x01);
+#   }
+#
+# to user_can_message_receive(). This will work for either a 7X or 7H module.
+#
+
+connectors:
+  PCAN:
+    notes: Peak PCAN
+    show_pincount: false
+    pinlabels: [-, CAN_L, GND, -, -, -, CAN_H, -, -]
+
+  CONTROL_MICROPLEX:
+    notes: control module
+    show_pincount: false
+    pinlabels: [GND, -, T30, CAN_L, CAN_H, T15, -, -, -, -, -, T30_OUT]
+
+  TARGET_MICROPLEX:
+    notes: module to be programmed
+    show_pincount: false
+    pinlabels: [GND, -, T30, CAN_L, CAN_H, -, -, -, -, -, -, -]
+
+  POWER:
+    notes: power supply
+    show_pincount: false
+    pinlabels: [T30, GND]
+
+cables:
+  B_0:
+    category: bundle
+    show_name: false
+    show_wirecount: false
+    colors: [RD, BK]
+  B_1:
+    category: bundle
+    show_name: false
+    show_wirecount: false
+    colors: [WH, BU, BK]
+
+  B_2:
+    category: bundle
+    show_name: false
+    show_wirecount: false
+    colors: [BK, BU, WH, OG]
+
+connections:
+  -
+    - POWER: [T30, GND]
+    - B_0: [1, 2]
+    - CONTROL_MICROPLEX: [T30, GND]
+  -
+    - PCAN: [CAN_H, CAN_L, GND]
+    - B_1: [1, 2, 3]
+    - CONTROL_MICROPLEX: [CAN_H, CAN_L, GND]
+  -
+    - CONTROL_MICROPLEX: [T30_OUT, CAN_H, CAN_L, GND]
+    - B_2: [4, 3, 2, 1]
+    - TARGET_MICROPLEX: [T30, CAN_H, CAN_L, GND]

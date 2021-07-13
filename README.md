@@ -18,6 +18,9 @@ Flasher
 Requires modern Python and the Peak PCAN API installed on your system. macOS users can
 use mac-CAN.
 
+See flasher_wiring.yaml (needs WireViz) for details on making a flash harness using a 
+spare Microplex 7X or 7H.
+
 
 Firmware
 ========

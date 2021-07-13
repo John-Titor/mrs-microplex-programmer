@@ -58,7 +58,7 @@ def do_console(module, args):
     line = ''
     while True:
         fragment = module.get_console_data()
-        line += fragment.decode()
+        line += bytes(fragment).decode()
         if line.endswith('\0'):
             print(line)
             line = ''
@@ -93,7 +93,7 @@ parser.add_argument('--can-speed',
                     default=500,
                     metavar='BITRATE_KBPS',
                     help='CAN bitrate (kBps')
-parser.add_argument('--console',
+parser.add_argument('--console-after-upload',
                     action='store_true',
                     help='monitor console messages after upload')
 parser.add_argument('--power-cycle-after-upload',
@@ -117,6 +117,9 @@ actiongroup.add_argument('--upload',
 actiongroup.add_argument('--erase',
                          action='store_true',
                          help='erase the program')
+actiongroup.add_argument('--console',
+                         action='store_true',
+                         help='turn on module power and monitor the console')
 actiongroup.add_argument('--print-module-parameters',
                          action='store_true',
                          help='print all module parameters')
@@ -137,21 +140,38 @@ elif args.print_fixed_s32k_srecords is not None:
     do_print_s32k_srecords(args.print_fixed_s32k_srecords, args)
 else:
     try:
+        # find and connect to a module
         interface = Interface(args)
         module_id = interface.detect()
         module = Module(interface, module_id, args)
+
+        # Upload S-records
         if args.upload is not None:
             do_upload(module, args)
             if args.power_cycle_after_upload:
                 interface.set_power_off()
                 time.sleep(0.25)
                 interface.set_power_t30_t15()
-            if args.console:
+
+            if args.console_after_upload:
                 do_console(interface, args)
-        elif args.erase:
+
+        # Erase the module
+        if args.erase:
             do_erase(module, args)
-        elif args.print_module_parameters:
+
+        # Print module parameters
+        if args.print_module_parameters:
             do_print_parameters(module, args)
-    except KeyboardInterrupt:
-        if interface is not None:
+
+        # Reset the module and run the console
+        # If we don't reset, it will sit for a (long) while in the bootloader
+        # after detection before timing out and starting the app. This is faster.
+        if args.console:
             interface.set_power_off()
+            time.sleep(0.25)
+            interface.set_power_t30_t15()
+            do_console(interface, args)
+
+    except KeyboardInterrupt:
+        pass
