@@ -78,12 +78,16 @@ def do_print_parameters(module, args):
 def do_print_hcs08_srecords(srec_file, args):
     srecords = HCS08_Srecords(srec_file, args)
     for srec in srecords.text_records:
+        if args.crlf:
+            srec += '\r'
         print(srec)
 
 
 def do_print_s32k_srecords(srec_file, args):
     srecords = S32K_Srecords(srec_file, args, 6)
     for srec in srecords.text_records:
+        if args.crlf:
+            srec += '\r'
         print(srec)
 
 
@@ -105,6 +109,9 @@ parser.add_argument('--kl15-after-upload',
 parser.add_argument('--power-off',
                     action='store_true',
                     help='turn power off at exit')
+parser.add_argument('--crlf',
+                    action='store_true',
+                    help='print S-records with Windows-style line endings')
 parser.add_argument('--verbose',
                     action='store_true',
                     help='print verbose progress information')

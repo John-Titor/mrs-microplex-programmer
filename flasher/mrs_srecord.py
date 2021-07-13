@@ -123,12 +123,17 @@ class S32K_Srecords(object):
             raise RuntimeError(f'could not read S-records from {path}')
 
         # convert lines to S-records
+        self._s0_records = list()
         mem_records = dict()
         self._image_entry = None
         header_base = flash_limit
         image_limit = self._flash_base
         for line in lines:
             srec = Srecord.from_line(line.strip())
+
+            # S0 record?
+            if srec.flavor == '0':
+                self._s0_records += srec
 
             # flash data
             if srec.flavor == '3':
@@ -254,6 +259,9 @@ class S32K_Srecords(object):
     def text_records(self):
         """generator yielding text S-records"""
 
+        for srec in self._s0_records:
+            yield str(srec)
+
         for offset in range(0, len(self._mem_buf), 32):
             address = self._flash_base + offset
             payload = self._mem_buf[offset:offset + 32]
@@ -282,6 +290,7 @@ class HCS08_Srecords(object):
 
     def __init__(self, path, args):
         self._hexbytes = dict()
+        self._s0_records = list()
 
         # read the input file
         try:
@@ -296,6 +305,8 @@ class HCS08_Srecords(object):
                 raise RuntimeError(f'malformed S-record: {line}')
             if line[1] in '2378':
                 raise RuntimeError(f'unsupported S{line[1]} record: {line}')
+            if line[1] == '0':
+                self._s0_records += [line.strip()]
             if line[1] != '1':
                 # ignore anything that's not an S1 record; we discard S[056],
                 # and fake S9 at the end
@@ -361,8 +372,10 @@ class HCS08_Srecords(object):
     @property
     def text_records(self):
         """generator yielding text S-records"""
-        addresses = sorted(self._hexbytes)
+        for line in self._s0_records:
+            yield line
 
+        addresses = sorted(self._hexbytes)
         while len(addresses):
 
             # address of next S1 record to emit
