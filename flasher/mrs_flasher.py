@@ -77,7 +77,7 @@ def do_print_parameters(module, args):
 
 def do_print_hcs08_srecords(srec_file, args):
     srecords = HCS08_Srecords(srec_file, args)
-    for srec in srecords.text_records:
+    for srec in srecords.text_records():
         if args.crlf:
             srec += '\r'
         print(srec)
@@ -85,7 +85,7 @@ def do_print_hcs08_srecords(srec_file, args):
 
 def do_print_s32k_srecords(srec_file, args):
     srecords = S32K_Srecords(srec_file, args, 6)
-    for srec in srecords.text_records:
+    for srec in srecords.text_records():
         if args.crlf:
             srec += '\r'
         print(srec)

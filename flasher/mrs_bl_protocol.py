@@ -631,7 +631,7 @@ class Module(object):
     def _program(self, srecords):
         """flash srecords to the currently-selected module"""
         progress = 1
-        records = list(srecords.upload_records)
+        records = list(srecords.upload_records())
         memory_records = records[:-1]
         terminal_record = records[-1]
 

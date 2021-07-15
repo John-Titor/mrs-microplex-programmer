@@ -255,12 +255,12 @@ class S32K_Srecords(object):
         # in case we want to try patching it later.
         #
 
-    @property
-    def text_records(self):
+    def text_records(self, upload_only=False):
         """generator yielding text S-records"""
 
-        for srec in self._s0_records:
-            yield str(srec)
+        if not upload_only:
+            for srec in self._s0_records:
+                yield str(srec)
 
         for offset in range(0, len(self._mem_buf), 32):
             address = self._flash_base + offset
@@ -269,10 +269,9 @@ class S32K_Srecords(object):
 
         yield str(Srecord('7', self._image_entry, None))
 
-    @property
     def upload_records(self):
         """generator yielding S-records in ready-to-send format"""
-        for srec in self.text_records:
+        for srec in self.text_records(upload_only=True):
             # first two bytes to send are ascii, remainder are literals
             yield bytearray(srec[0:2], 'ascii') + bytes.fromhex(srec[2:])
 
@@ -369,11 +368,11 @@ class HCS08_Srecords(object):
         except KeyError:
             return None
 
-    @property
-    def text_records(self):
+    def text_records(self, upload_only=False):
         """generator yielding text S-records"""
-        for line in self._s0_records:
-            yield line
+        if not upload_only:
+            for line in self._s0_records:
+                yield line
 
         addresses = sorted(self._hexbytes)
         while len(addresses):
@@ -394,9 +393,8 @@ class HCS08_Srecords(object):
 
         yield "S9030000FC"
 
-    @property
     def upload_records(self):
         """generator yielding S-records in ready-to-send format"""
-        for srec in self.text_records:
+        for srec in self.text_records(upload_only=True):
             # first two bytes to send are ascii, remainder are literals
             yield bytearray(srec[0:2], 'ascii') + bytes.fromhex(srec[2:])
