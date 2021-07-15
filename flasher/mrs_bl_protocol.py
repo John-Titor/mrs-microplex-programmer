@@ -15,6 +15,10 @@ DATA_ID = 0x1ffffff4
 CONSOLE_ID = 0x1ffffffe
 MODULE_POWER_ID = 0x0fffffff
 
+RECEIVE_FILTER = [
+    ACK_ID, RSP_ID, DATA_ID, CONSOLE_ID
+]
+
 # Module parameters (stored in EEPROM)
 PARAMETER_MAGIC = 1331
 PARAMETER_MAP = [
@@ -56,11 +60,13 @@ PARAMETER_MAP = [
     ('7B',  'Reserved2')
 ]
 
+
 def print_param_offsets():
-    offset = 0;
+    offset = 0
     for fmt, name in PARAMETER_MAP:
         print(f'{offset:#02x}: {name}')
         offset += struct.calcsize(fmt)
+
 
 def _str_TPCANMsg(msg):
     s = f'{msg.ID:#010x}:{msg.LEN}:'
@@ -425,10 +431,11 @@ class Interface(object):
         while True:
             (status, msg, _) = self._pcan.Read(self._channel)
             if status == PCAN_ERROR_OK:
-                self._trace(f'CAN RX: {msg}')
-                return msg
-            if status != PCAN_ERROR_QRCVEMPTY:
-                raise RuntimeError(f'PCAN read failed: {self._pcan.GetErrorText(result)}')
+                if msg.ID in RECEIVE_FILTER:
+                    self._trace(f'CAN RX: {msg}')
+                    return msg
+            elif status != PCAN_ERROR_QRCVEMPTY:
+                raise RuntimeError(f'PCAN read failed: {self._pcan.GetErrorText(status)}')
             now = time.time()
             if now > deadline:
                 return None
