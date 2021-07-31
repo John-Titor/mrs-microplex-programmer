@@ -176,6 +176,9 @@ class MSG_srecord(object):
         for i in range(len(data)):
             self.raw.DATA[i] = data[i]
 
+    def __str__(self):
+        return f'{self.raw}'
+
 
 class RXMessage(object):
     """

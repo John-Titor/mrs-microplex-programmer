@@ -109,7 +109,7 @@ class S32K_Srecords(object):
 
         # configure properties for the MCU
         if mcu_type == 6:
-            # S32K144
+            # S32K144 with MRS bootloader; bootloader owns the first 64K of the actual flash.
             self._flash_base = 0x10000
             flash_limit = 0x80000
         else:
@@ -133,7 +133,7 @@ class S32K_Srecords(object):
 
             # S0 record?
             if srec.flavor == '0':
-                self._s0_records += srec
+                self._s0_records += [srec]
 
             # flash data
             if srec.flavor == '3':
@@ -158,7 +158,7 @@ class S32K_Srecords(object):
 
         # image must start at base of flash
         if header_base != self._flash_base:
-            raise RuntimeError(f'data does not start at base of flash')
+            raise RuntimeError(f'data does not start at base of flash ({header_base:#x} != {self._flash_base:#x})')
 
         # round the image limit up to a multiple of 256
         # XXX is this a hard requirement, or only for signing?
